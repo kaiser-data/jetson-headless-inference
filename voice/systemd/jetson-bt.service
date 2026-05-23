@@ -1,0 +1,18 @@
+[Unit]
+Description=Jetson AI — Bluetooth Speaker Auto-connect
+After=bluetooth.target pulseaudio.service graphical-session.target
+Wants=pulseaudio.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="BT_SPEAKER_MAC=88:88:11:07:10:5C"
+Environment="BT_SPEAKER_NAME=Boomcore P06"
+ExecStart=/bin/bash %h/gamma4_models/voice/bt-connect.sh
+# On disconnect, try to reconnect once
+ExecStop=/usr/bin/bluetoothctl disconnect ${BT_SPEAKER_MAC}
+StandardOutput=append:%h/.local/share/jetson-ai/bt.log
+StandardError=append:%h/.local/share/jetson-ai/bt.log
+
+[Install]
+WantedBy=default.target

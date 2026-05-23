@@ -1,0 +1,17 @@
+[Unit]
+Description=Jetson AI — Control & Status API (port 8080)
+After=jetson-pipeline.service network.target
+Wants=jetson-pipeline.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/gamma4_models
+EnvironmentFile=-%h/gamma4_models/.voice_env
+ExecStart=/usr/bin/python3 %h/gamma4_models/voice/control-api.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.local/share/jetson-ai/control.log
+StandardError=append:%h/.local/share/jetson-ai/control.log
+
+[Install]
+WantedBy=default.target

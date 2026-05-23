@@ -683,23 +683,68 @@ cmd_tasks() {
 }
 
 # -------------------------------------------------------
+cmd_install_services() {
+    local SYSTEMD_DIR="$HOME/.config/systemd/user"
+    local SVC_SRC="$(cd "$(dirname "$0")" && pwd)/voice/systemd"
+
+    echo ""; _sep; _info "Installing systemd user services"; _sep; echo ""
+    mkdir -p "$SYSTEMD_DIR"
+
+    for SVC in jetson-piper jetson-pipeline jetson-control jetson-bt; do
+        cp "$SVC_SRC/$SVC.service" "$SYSTEMD_DIR/"
+        _log "Installed $SVC.service"
+    done
+
+    systemctl --user daemon-reload
+    systemctl --user enable jetson-piper jetson-pipeline jetson-control jetson-bt
+    _log "Services enabled for autostart on login"
+
+    echo ""; _sep
+    _info "Services installed. They start automatically on next login."
+    _info ""
+    _info "Start now without rebooting:"
+    _info "  systemctl --user start jetson-bt"
+    _info "  systemctl --user start jetson-piper"
+    _info "  systemctl --user start jetson-pipeline"
+    _info "  systemctl --user start jetson-control"
+    _info ""
+    _info "Control API will be available at:"
+    _info "  http://$IP:8080/status    ← full status"
+    _info "  http://$IP:8080/speak     ← POST {prompt} to speak"
+    _info "  http://$IP:8080/bt/connect"
+    _sep; echo ""
+}
+
+cmd_services_status() {
+    echo ""; _sep; _info "Systemd service status"; _sep
+    for SVC in jetson-bt jetson-piper jetson-pipeline jetson-control; do
+        local STATE
+        STATE=$(systemctl --user is-active "$SVC" 2>/dev/null || echo "not-installed")
+        printf "  %-24s %s\n" "$SVC" "$STATE"
+    done
+    echo ""; _tts_status; _sep; echo ""
+}
+
+# -------------------------------------------------------
 case "${1:-help}" in
-    setup)  cmd_setup ;;
-    start)  cmd_start  "${2:-}" "${3:-}" ;;
-    stop)   cmd_stop ;;
-    switch) cmd_switch "${2:-}" ;;
-    status) cmd_status ;;
-    list)   cmd_list ;;
-    bench)  cmd_bench  "${2:-}" ;;
-    tasks)  cmd_tasks ;;
-    pull)   shift; ollama pull "${1:-}" ;;
-    log)    tail -f "$LOG" ;;
+    setup)            cmd_setup ;;
+    start)            cmd_start  "${2:-}" "${3:-}" ;;
+    stop)             cmd_stop ;;
+    switch)           cmd_switch "${2:-}" ;;
+    status)           cmd_status ;;
+    list)             cmd_list ;;
+    bench)            cmd_bench  "${2:-}" ;;
+    tasks)            cmd_tasks ;;
+    pull)             shift; ollama pull "${1:-}" ;;
+    log)              tail -f "$LOG" ;;
+    install-services) cmd_install_services ;;
+    services)         cmd_services_status ;;
     tts)
         case "${2:-help}" in
-            start) _tts_start "${3:-local}" ;;
-            stop)  _tts_stop ;;
+            start)  _tts_start "${3:-local}" ;;
+            stop)   _tts_stop ;;
             status) _tts_status ;;
-            log)   tail -f "$STATE_DIR/piper.log" "$STATE_DIR/pipeline.log" ;;
+            log)    tail -f "$STATE_DIR/piper.log" "$STATE_DIR/pipeline.log" ;;
             *) _info "Usage: ./jetson-ai.sh tts start [local|api] | stop | status | log" ;;
         esac
         ;;
@@ -723,6 +768,17 @@ case "${1:-help}" in
         _info "pull   <model>        Download a model (e.g. qwen3.5:0.8b)"
         _info "log                   Tail live log"
         _info "tts    start|stop|status|log   Manage voice services independently"
+        _sep
+        _info "── Autostart & Remote Control ────────────────────────────────"
+        _info "install-services      Install systemd units (autostart on login)"
+        _info "services              Show systemd service status"
+        _sep
+        _info "Control API (port 8080) — accessible over Tailscale/LAN:"
+        _info "  GET  /status                  full system status"
+        _info "  POST /speak {prompt}          speak on local speaker"
+        _info "  POST /control/start {mode}    start a mode remotely"
+        _info "  POST /bt/connect              connect BT speaker"
+        _info "  PUT  /control/sink {sink}     switch audio output"
         _sep
         _info "Task aliases: default fast reasoning code german vision tiny chat quality"
         _sep

@@ -1,0 +1,20 @@
+[Unit]
+Description=Jetson AI — Voice Pipeline (port 8000)
+After=jetson-piper.service network.target
+Wants=jetson-piper.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/gamma4_models
+# Source optional env overrides from .voice_env if present
+EnvironmentFile=-%h/gamma4_models/.voice_env
+Environment="VOICE_MODE=local"
+Environment="VOICE_OUTPUT=stream"
+ExecStart=/usr/bin/python3 %h/gamma4_models/voice/voice-pipeline.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.local/share/jetson-ai/pipeline.log
+StandardError=append:%h/.local/share/jetson-ai/pipeline.log
+
+[Install]
+WantedBy=default.target
