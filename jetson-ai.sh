@@ -1,17 +1,20 @@
 #!/bin/bash
 # =============================================================
-# Jetson Orin 8GB — AI API Controller v2.0
+# Jetson Orin 8GB — AI API Controller v3.0
 # GitHub: https://github.com/kaiser-data/jetson-ai-api
 #
-# Architecture: controls the existing ollama.service via
-# systemd (no conflicting second process). Power mode,
-# desktop, and model loading managed separately.
+# 3 modes:
+#   local          — Ollama GPU LLM only (text API)
+#   voice          — Ollama GPU LLM + Piper TTS (streaming audio)
+#   api            — Cloud LLM API + Piper TTS (no GPU needed)
 #
 # First-time setup (once, needs password):
 #   ./jetson-ai.sh setup
 #
 # Daily use:
-#   ./jetson-ai.sh start [model|task]
+#   ./jetson-ai.sh start [model|task]         # local LLM only
+#   ./jetson-ai.sh start voice [model|task]   # local LLM + voice
+#   ./jetson-ai.sh start api                  # cloud API + voice
 #   ./jetson-ai.sh switch [model|task]
 #   ./jetson-ai.sh stop
 # =============================================================
@@ -19,11 +22,16 @@
 set -euo pipefail
 
 PORT=11434
+PIPER_PORT=5500
+PIPELINE_PORT=8000
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 STATE_DIR="$HOME/.local/share/jetson-ai"
 STATE_FILE="$STATE_DIR/state"
 LOG="$STATE_DIR/jetson-ai.log"
 MODEL_FILE="$STATE_DIR/current-model"
+PIPER_PID_FILE="$STATE_DIR/piper.pid"
+PIPELINE_PID_FILE="$STATE_DIR/pipeline.pid"
+VOICE_DIR="$(cd "$(dirname "$0")" && pwd)/voice"
 
 mkdir -p "$STATE_DIR"
 
@@ -146,6 +154,71 @@ _ensure_model() {
 }
 
 # -------------------------------------------------------
+# Voice / TTS service helpers
+
+_piper_up() {
+    curl -s --max-time 2 "http://localhost:$PIPER_PORT/health" >/dev/null 2>&1
+}
+_pipeline_up() {
+    curl -s --max-time 2 "http://localhost:$PIPELINE_PORT/health" >/dev/null 2>&1
+}
+
+_tts_start() {
+    local MODE="${1:-local}"    # local | api
+
+    if ! _piper_up; then
+        _log "Starting Piper TTS (port $PIPER_PORT)..."
+        nohup python3 "$VOICE_DIR/piper-service.py" \
+            > "$STATE_DIR/piper.log" 2>&1 &
+        echo $! > "$PIPER_PID_FILE"
+        local n=0
+        while [ $n -lt 15 ]; do _piper_up && break; sleep 1; n=$((n+1)); done
+        if _piper_up; then _log "✓ Piper TTS ready"
+        else _warn "Piper TTS failed — see $STATE_DIR/piper.log"; fi
+    fi
+
+    if ! _pipeline_up; then
+        _log "Starting voice pipeline (port $PIPELINE_PORT, mode=$MODE)..."
+        VOICE_MODE="$MODE" nohup python3 "$VOICE_DIR/voice-pipeline.py" \
+            > "$STATE_DIR/pipeline.log" 2>&1 &
+        echo $! > "$PIPELINE_PID_FILE"
+        local n=0
+        while [ $n -lt 15 ]; do _pipeline_up && break; sleep 1; n=$((n+1)); done
+        if _pipeline_up; then _log "✓ Voice pipeline ready"
+        else _warn "Pipeline failed — see $STATE_DIR/pipeline.log"; fi
+    fi
+}
+
+_tts_stop() {
+    for F in "$PIPER_PID_FILE" "$PIPELINE_PID_FILE"; do
+        if [ -f "$F" ]; then
+            local PID
+            PID=$(cat "$F" 2>/dev/null || true)
+            [ -n "$PID" ] && kill "$PID" 2>/dev/null && _log "Stopped TTS PID $PID"
+            rm -f "$F"
+        fi
+    done
+    pkill -f "piper-service.py"  2>/dev/null || true
+    pkill -f "voice-pipeline.py" 2>/dev/null || true
+}
+
+_tts_status() {
+    if _piper_up; then
+        printf "  Piper TTS : RUNNING  http://%s:%s\n" "$IP" "$PIPER_PORT"
+    else
+        printf "  Piper TTS : stopped\n"
+    fi
+    if _pipeline_up; then
+        local VMODE
+        VMODE=$(curl -s --max-time 2 "http://localhost:$PIPELINE_PORT/health" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('mode','?'))" 2>/dev/null || echo "?")
+        printf "  Pipeline  : RUNNING  http://%s:%s  mode=%s\n" "$IP" "$PIPELINE_PORT" "$VMODE"
+    else
+        printf "  Pipeline  : stopped\n"
+    fi
+}
+
+# -------------------------------------------------------
 cmd_setup() {
     echo ""
     _sep
@@ -215,7 +288,52 @@ EOF
 # -------------------------------------------------------
 cmd_start() {
     local ARG="${1:-default}"
-    local MODEL="${TASK_MODEL[$ARG]:-$ARG}"
+
+    # ── Mode: api ──────────────────────────────────────────
+    if [ "$ARG" = "api" ]; then
+        echo ""; _sep; _info "Jetson AI — API + Voice Mode"; _sep; echo ""
+        _info "Cloud LLM + Piper TTS — no local GPU LLM needed"
+        _info "Set OPENAI_API_KEY or ANTHROPIC_API_KEY before starting."
+        echo ""
+
+        {
+            echo "mode=api"
+            echo "dm="
+            echo "power=$(_power)"
+            echo "started=$(date +%s)"
+        } > "$STATE_FILE"
+
+        _tts_start "api"
+
+        echo ""; _sep
+        printf "  ✓  READY (API + Voice)\n"
+        _sep
+        printf "  Mode       : api (cloud LLM + local TTS)\n"
+        printf "  RAM        : %s\n" "$(_free_h)"
+        printf "  Piper TTS  : http://%s:%s/v1/audio/speech\n" "$IP" "$PIPER_PORT"
+        printf "  Pipeline   : http://%s:%s/voice/chat\n"      "$IP" "$PIPELINE_PORT"
+        _sep
+        _info "Pipeline request (set mode in body):"
+        _info "  {\"prompt\":\"...\",\"voice\":\"en\",\"mode\":\"openai\",\"api_key\":\"sk-...\"}"
+        _info "  {\"prompt\":\"...\",\"voice\":\"de\",\"mode\":\"anthropic\",\"api_key\":\"sk-ant-...\"}"
+        _sep
+        _info "Commands:"
+        _info "  ./jetson-ai.sh stop"
+        _info "  python3 voice/sample-client.py health"
+        echo ""
+        return
+    fi
+
+    # ── Mode: local or voice ────────────────────────────────
+    local VOICE_MODE_ENABLED=0
+    local MODEL_ARG="$ARG"
+
+    if [ "$ARG" = "voice" ]; then
+        VOICE_MODE_ENABLED=1
+        MODEL_ARG="${2:-default}"
+    fi
+
+    local MODEL="${TASK_MODEL[$MODEL_ARG]:-$MODEL_ARG}"
 
     _sudo_ok || {
         _warn "Sudo not configured for passwordless use."
@@ -231,26 +349,28 @@ cmd_start() {
 
     _ensure_model "$MODEL"
 
-    echo ""; _sep; _info "Jetson AI — Starting Headless Mode"; _sep; echo ""
+    local MODE_LABEL="Local LLM"
+    [ "$VOICE_MODE_ENABLED" -eq 1 ] && MODE_LABEL="Local LLM + Voice"
+    echo ""; _sep; _info "Jetson AI — Headless Mode ($MODE_LABEL)"; _sep; echo ""
 
-    # Save current state
-    local DM
+    # Save state
+    local DM PREV_POWER
     DM=$(_get_dm)
-    local PREV_POWER
     PREV_POWER=$(_power)
     {
+        echo "mode=$([ "$VOICE_MODE_ENABLED" -eq 1 ] && echo voice || echo local)"
         echo "dm=$DM"
         echo "power=$PREV_POWER"
         echo "started=$(date +%s)"
     } > "$STATE_FILE"
 
-    # 1. Max power mode
+    # Max power mode
     _log "Power: $PREV_POWER → MAXN_SUPER ..."
     sudo nvpmodel -m 2 2>/dev/null && sudo jetson_clocks 2>/dev/null \
         || _warn "Could not set power mode (run setup first)"
     _log "Power mode: $(_power)"
 
-    # 2. Stop desktop — frees ~1.5 GB
+    # Stop desktop — frees ~1.5 GB for GPU
     if [ -n "$DM" ]; then
         _log "Stopping $DM (frees ~1.5 GB RAM)..."
         sudo systemctl stop "$DM" 2>/dev/null
@@ -258,10 +378,10 @@ cmd_start() {
     fi
     _log "RAM after desktop stop: $(_free_h)"
 
-    # 3. GPU fit check
+    # GPU fit check
     _info "GPU fit: $(_fit_check "$MODEL")"
 
-    # 4. Load model and keep in RAM
+    # Load model
     _log "Loading model: $MODEL ..."
     local RESP
     RESP=$(curl -s --max-time 120 "http://localhost:$PORT/api/generate" \
@@ -277,19 +397,33 @@ cmd_start() {
     local GPU
     GPU=$(_gpu_pct "$MODEL")
 
+    # Start voice services if requested
+    if [ "$VOICE_MODE_ENABLED" -eq 1 ]; then
+        _tts_start "local"
+    fi
+
     echo ""; _sep
     printf "  ✓  READY\n"
     _sep
+    printf "  Mode       : %s\n" "$MODE_LABEL"
     printf "  Model      : %s\n" "$MODEL"
     printf "  GPU layers : %s%%\n" "$GPU"
     [ "$GPU" -lt 50 ] 2>/dev/null && _warn "Low GPU% → CPU fallback likely. Free more RAM or use smaller model."
     printf "  RAM        : %s\n" "$(_free_h)"
     printf "  Power      : %s\n" "$(_power)"
-    printf "  API (LAN)  : http://%s\n" "$IP:$PORT"
+    printf "  LLM API    : http://%s:%s\n" "$IP" "$PORT"
+    if [ "$VOICE_MODE_ENABLED" -eq 1 ]; then
+        printf "  Piper TTS  : http://%s:%s/v1/audio/speech\n" "$IP" "$PIPER_PORT"
+        printf "  Pipeline   : http://%s:%s/voice/chat\n"      "$IP" "$PIPELINE_PORT"
+    fi
     _sep
     _info "Endpoints:"
     _info "  /api/generate          (ollama native)"
     _info "  /v1/chat/completions   (OpenAI-compatible)"
+    if [ "$VOICE_MODE_ENABLED" -eq 1 ]; then
+        _info "  :5500/v1/audio/speech  (Piper TTS — OpenAI-compatible)"
+        _info "  :8000/voice/chat       (LLM+TTS streaming audio)"
+    fi
     _sep
     _info "Commands:"
     _info "  ./jetson-ai.sh switch <model|task>"
@@ -300,7 +434,13 @@ cmd_start() {
 
 # -------------------------------------------------------
 cmd_stop() {
-    echo ""; _log "Stopping AI API..."
+    echo ""; _log "Stopping AI services..."
+
+    # Stop voice services first
+    if _piper_up || _pipeline_up; then
+        _log "Stopping voice services..."
+        _tts_stop
+    fi
 
     # Unload model from RAM
     local MODEL
@@ -323,17 +463,17 @@ cmd_stop() {
         7W)                        sudo nvpmodel -m 3 2>/dev/null || true ;;
     esac
 
-    # Restore desktop
+    # Restore desktop (not needed in api mode — it was never stopped)
     local DM
     DM=$(grep "^dm=" "$STATE_FILE" 2>/dev/null | cut -d= -f2 || echo "")
     if [ -n "$DM" ]; then
         _log "Restoring desktop ($DM)..."
         sudo systemctl start "$DM" 2>/dev/null || true
+        _info "Desktop restoring — give it 5–10 seconds."
     fi
     rm -f "$STATE_FILE"
 
     _log "Done. RAM: $(_free_h)"
-    _info "Desktop restoring — give it 5–10 seconds."
     echo ""
 }
 
@@ -379,23 +519,25 @@ cmd_switch() {
 
 # -------------------------------------------------------
 cmd_status() {
+    local CUR_MODE
+    CUR_MODE=$(grep "^mode=" "$STATE_FILE" 2>/dev/null | cut -d= -f2 || echo "")
     echo ""; _sep
-    if _ollama_up; then
+    if _ollama_up || _piper_up || _pipeline_up; then
         local MODEL GPU
         MODEL=$(_current_model)
-        GPU=$(_gpu_pct "$MODEL")
-        _info "Status     : RUNNING"
-        _info "API URL    : http://$IP:$PORT"
-        _info "Model      : $MODEL"
-        _info "GPU layers : ${GPU}%"
+        _info "Mode       : ${CUR_MODE:-local}"
         _info "Power      : $(_power)"
         _info "RAM        : $(_free_h)"
-        _info "Desktop    : $([ -f "$STATE_FILE" ] && echo 'stopped (headless)' || echo 'running')"
-        if [ "$GPU" -lt 50 ] 2>/dev/null && [ "$MODEL" != "none" ]; then
-            _sep
-            _warn "GPU% is low — model likely running on CPU (expect ~0.3 tok/s)"
-            _warn "Fix: ./jetson-ai.sh stop && ./jetson-ai.sh start (stops desktop for more RAM)"
+        _info "Desktop    : $([ -n "$(grep "^dm=." "$STATE_FILE" 2>/dev/null)" ] && echo 'stopped (headless)' || echo 'running')"
+        if _ollama_up; then
+            GPU=$(_gpu_pct "$MODEL")
+            _info "LLM        : RUNNING  http://$IP:$PORT  model=$MODEL  GPU=${GPU}%"
+            [ "$GPU" -lt 50 ] 2>/dev/null && [ "$MODEL" != "none" ] && \
+                _warn "Low GPU% — model on CPU (expect ~0.3 tok/s). Run stop+start to free RAM."
+        else
+            _info "LLM        : stopped"
         fi
+        _tts_status
     else
         _info "Status     : STOPPED"
         _info "Power      : $(_power)"
@@ -543,7 +685,7 @@ cmd_tasks() {
 # -------------------------------------------------------
 case "${1:-help}" in
     setup)  cmd_setup ;;
-    start)  cmd_start  "${2:-}" ;;
+    start)  cmd_start  "${2:-}" "${3:-}" ;;
     stop)   cmd_stop ;;
     switch) cmd_switch "${2:-}" ;;
     status) cmd_status ;;
@@ -552,23 +694,42 @@ case "${1:-help}" in
     tasks)  cmd_tasks ;;
     pull)   shift; ollama pull "${1:-}" ;;
     log)    tail -f "$LOG" ;;
+    tts)
+        case "${2:-help}" in
+            start) _tts_start "${3:-local}" ;;
+            stop)  _tts_stop ;;
+            status) _tts_status ;;
+            log)   tail -f "$STATE_DIR/piper.log" "$STATE_DIR/pipeline.log" ;;
+            *) _info "Usage: ./jetson-ai.sh tts start [local|api] | stop | status | log" ;;
+        esac
+        ;;
     *)
         echo ""
-        _info "Jetson AI Controller v2.0"
+        _info "Jetson AI Controller v3.0"
         _sep
         _info "FIRST TIME:  ./jetson-ai.sh setup"
         _sep
-        _info "start  [model|task]   Headless: max power, stop desktop, load model"
-        _info "stop                  Restore desktop + power mode"
-        _info "switch [model|task]   Hot-swap model (no restart, ~20s)"
-        _info "status                RAM / GPU% / power / API state"
+        _info "── 3 Modes ──────────────────────────────────────────"
+        _info "start  [model|task]        Mode 1: local LLM only (GPU)"
+        _info "start  voice [model|task]  Mode 2: local LLM + Piper TTS"
+        _info "start  api                 Mode 3: cloud API + Piper TTS (no GPU LLM)"
+        _sep
+        _info "stop                  Stop all services, restore desktop + power"
+        _info "switch [model|task]   Hot-swap LLM model (~20s)"
+        _info "status                Full status: LLM + TTS + power + RAM"
         _info "list                  Models: size, tok/s, current fit"
-        _info "bench  [model]        3-run average tok/s + CPU fallback detection"
+        _info "bench  [model]        3-run average tok/s + CPU detection"
         _info "tasks                 Task → model routing guide"
         _info "pull   <model>        Download a model (e.g. qwen3.5:0.8b)"
         _info "log                   Tail live log"
+        _info "tts    start|stop|status|log   Manage voice services independently"
         _sep
         _info "Task aliases: default fast reasoning code german vision tiny chat quality"
+        _sep
+        _info "Memory budget:"
+        _info "  local:  OS 0.5 + LLM 3.4 = 4.0 GB  (desktop off, GPU on)"
+        _info "  voice:  OS 0.5 + LLM 3.4 + TTS 0.1 = 4.0 GB"
+        _info "  api:    OS 0.5 + TTS 0.1 = 0.6 GB  (desktop can stay on)"
         echo ""
         ;;
 esac
