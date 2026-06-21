@@ -24,6 +24,7 @@ TTS_SVC  = "http://localhost:5500"
 
 
 def _play_or_save(audio_bytes: bytes, label: str = "response"):
+    # 1. Try pyaudio (cross-platform)
     try:
         import pyaudio
         buf = io.BytesIO(audio_bytes)
@@ -42,12 +43,43 @@ def _play_or_save(audio_bytes: bytes, label: str = "response"):
             stream.stop_stream()
             stream.close()
             pa.terminate()
-        print("  ✓ Played audio")
+        print("  ✓ Played audio (pyaudio)")
+        return
     except ImportError:
-        path = f"{label}.wav"
-        with open(path, "wb") as f:
+        pass
+
+    # 2. Try paplay via ffmpeg resample → avoids HFP resampler artifacts
+    import subprocess, tempfile, os
+    has_paplay = subprocess.run(["which", "paplay"], capture_output=True).returncode == 0
+    has_ffmpeg = subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0
+    if has_paplay:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(audio_bytes)
-        print(f"  ✓ Saved → {path}  (pyaudio not installed for live playback)")
+            tmp = f.name
+        try:
+            if has_ffmpeg:
+                # Resample to 16kHz mono to match HFP BT profile cleanly
+                p1 = subprocess.Popen(
+                    ["ffmpeg", "-i", tmp, "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1", "-loglevel", "quiet"],
+                    stdout=subprocess.PIPE,
+                )
+                subprocess.run(
+                    ["paplay", "--raw", "--rate=16000", "--channels=1", "--format=s16le"],
+                    stdin=p1.stdout, check=True,
+                )
+                p1.wait()
+            else:
+                subprocess.run(["paplay", tmp], check=True)
+            print("  ✓ Played audio (paplay / PulseAudio)")
+        finally:
+            os.unlink(tmp)
+        return
+
+    # 3. Fall back to saving
+    path = f"{label}.wav"
+    with open(path, "wb") as f:
+        f.write(audio_bytes)
+    print(f"  ✓ Saved → {path}  (install pyaudio or paplay for live playback)")
 
 
 def cmd_tts(args):

@@ -28,8 +28,11 @@ MODELS_DIR = Path(__file__).parent / "models"
 
 # Short alias → full model filename stem
 VOICE_MAP: dict[str, str] = {
-    "en":                  "en_US-lessac-medium",
-    "en_US":               "en_US-lessac-medium",
+    "en":                  "en_US-ryan-high",       # default EN: male, high quality
+    "en_US":               "en_US-ryan-high",
+    "en_male":             "en_US-ryan-high",
+    "en_US-ryan-high":     "en_US-ryan-high",
+    "en_female":           "en_US-lessac-medium",
     "en_US-lessac":        "en_US-lessac-medium",
     "en_US-lessac-medium": "en_US-lessac-medium",
     "de":                  "de_DE-thorsten-medium",

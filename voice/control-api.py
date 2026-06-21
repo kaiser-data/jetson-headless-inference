@@ -16,6 +16,8 @@ Endpoints:
   POST /bt/connect             → connect Bluetooth speaker
   POST /bt/disconnect          → disconnect Bluetooth speaker
   GET  /bt/status              → Bluetooth speaker state
+  POST /sync                   → trigger calendar/email data sync
+  GET  /sync/status            → show last sync timestamps from cache
 """
 
 import asyncio
@@ -313,6 +315,55 @@ async def bt_status():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ── Data sync ─────────────────────────────────────────────────────────────────
+
+CACHE_DIR    = Path.home() / ".local/share/jetson-ai/cache"
+DATA_SYNC_PY = VOICE_DIR / "data-sync.py"
+
+
+class SyncRequest(BaseModel):
+    target: str = "both"   # both | calendar | email
+
+
+@app.post("/sync")
+async def sync_data(req: SyncRequest, bg: BackgroundTasks):
+    """Trigger a data sync. Runs in background; check /sync/status for results."""
+    if req.target not in ("both", "calendar", "email"):
+        raise HTTPException(400, "target must be both | calendar | email")
+    cmd = [sys.executable, str(DATA_SYNC_PY), req.target]
+    bg.add_task(_run_bg, cmd, f"data-sync {req.target}")
+    return {"status": "syncing", "target": req.target}
+
+
+@app.get("/sync/status")
+def sync_status():
+    """Return last sync time and event/message counts from cache."""
+    result = {}
+    for name in ("calendar", "email"):
+        path = CACHE_DIR / f"{name}.json"
+        if not path.exists():
+            result[name] = {"status": "no_cache"}
+            continue
+        try:
+            data = json.loads(path.read_text())
+            entry: dict = {
+                "synced_at": data.get("synced_at"),
+                "status":    "error" if data.get("error") else "ok",
+            }
+            if name == "calendar":
+                entry["event_count"] = len(data.get("events", []))
+            else:
+                msgs = data.get("messages", [])
+                entry["message_count"] = len(msgs)
+                entry["unread_count"]  = sum(1 for m in msgs if m.get("is_unread"))
+            if data.get("error"):
+                entry["error"] = data["error"]
+            result[name] = entry
+        except Exception as e:
+            result[name] = {"status": "parse_error", "error": str(e)}
+    return result
 
 
 # ── Subprocess helpers ────────────────────────────────────────────────────────

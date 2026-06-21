@@ -3,3 +3,13 @@
 *.output
 __pycache__/
 .DS_Store
+
+# ── Credentials — never commit these ──────────────────────────────────────────
+.voice_env
+.google_credentials.json
+*_token.json
+*_credentials.json
+sync.json
+*.secret
+.env
+.env.*

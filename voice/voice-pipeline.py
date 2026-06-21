@@ -11,6 +11,11 @@ Output modes (per-request):
   speaker   — play on local speaker, return JSON {text, duration}
   both      — play locally AND return WAV (for monitoring/recording)
 
+Tool calling (use_tools=true in request):
+  Adds calendar/email tool access via local JSON cache.
+  Run voice/data-sync.py to populate cache.
+  Only supported in local (Ollama) and openai modes.
+
 Endpoints:
   POST /voice/chat   → audio (stream/both) or JSON (speaker)
   POST /voice/tts    → direct text→WAV, no LLM
@@ -46,6 +51,7 @@ log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sentence_splitter import StreamingSentenceSplitter
+from tools import TOOL_DEFS, TOOL_DEFS_ANTHROPIC, execute_tool
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -295,9 +301,152 @@ async def _output_speaker_or_both(
     return wav, full_text.strip(), duration
 
 
+# ── Tool-calling LLM (non-streaming, multi-round) ────────────────────────────
+
+MAX_TOOL_ROUNDS = 4   # max tool-call rounds before forcing a final answer
+
+async def _llm_with_tools_local(messages: list, model: str) -> str:
+    """Ollama tool-call resolution loop. Returns final assistant text."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        for _ in range(MAX_TOOL_ROUNDS):
+            payload = {
+                "model": model,
+                "messages": messages,
+                "tools": TOOL_DEFS,
+                "stream": False,
+                "think": False,
+                "options": {"num_predict": 1024},
+            }
+            resp = await client.post(f"http://{OLLAMA_HOST}/api/chat", json=payload)
+            resp.raise_for_status()
+            msg = resp.json().get("message", {})
+            tool_calls = msg.get("tool_calls") or []
+
+            if not tool_calls:
+                return msg.get("content", "")
+
+            messages.append({
+                "role": "assistant",
+                "content": msg.get("content", ""),
+                "tool_calls": tool_calls,
+            })
+            for tc in tool_calls:
+                fn     = tc.get("function", {})
+                name   = fn.get("name", "")
+                args   = fn.get("arguments", {})
+                result = execute_tool(name, args)
+                log.info("Tool: %s(%s) → %d chars", name, args, len(result))
+                messages.append({"role": "tool", "content": result, "tool_name": name})
+
+    return "I was unable to complete your request after several attempts."
+
+
+async def _llm_with_tools_openai(
+    messages: list, model: str, api_key: str, api_base: str
+) -> str:
+    """OpenAI-compatible tool-call loop (also works with local OpenAI-format proxies)."""
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=api_key or OPENAI_KEY, base_url=api_base or OPENAI_BASE)
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = await client.chat.completions.create(
+            model=model or OPENAI_MODEL,
+            messages=messages,
+            tools=TOOL_DEFS,
+            max_tokens=1024,
+        )
+        msg        = response.choices[0].message
+        tool_calls = msg.tool_calls or []
+
+        if not tool_calls:
+            return msg.content or ""
+
+        messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in tool_calls
+        ]})
+        for tc in tool_calls:
+            args   = json.loads(tc.function.arguments)
+            result = execute_tool(tc.function.name, args)
+            log.info("Tool: %s(%s) → %d chars", tc.function.name, args, len(result))
+            messages.append({"role": "tool", "content": result, "tool_call_id": tc.id})
+
+    return "I was unable to complete your request after several attempts."
+
+
+async def _llm_with_tools_anthropic(
+    messages: list, system: Optional[str], model: str, api_key: str
+) -> str:
+    """Anthropic tool-call loop."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=api_key or ANTHROPIC_KEY)
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        kwargs = dict(
+            model=model or ANTHROPIC_MOD,
+            max_tokens=1024,
+            messages=messages,
+            tools=TOOL_DEFS_ANTHROPIC,
+        )
+        if system:
+            kwargs["system"] = system
+        response = await client.messages.create(**kwargs)
+
+        # Collect text and tool_use blocks
+        text_parts = []
+        tool_uses  = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_uses.append(block)
+
+        if not tool_uses:
+            return " ".join(text_parts)
+
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        for tu in tool_uses:
+            result = execute_tool(tu.name, tu.input)
+            log.info("Tool: %s(%s) → %d chars", tu.name, tu.input, len(result))
+            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result})
+        messages.append({"role": "user", "content": tool_results})
+
+    return "I was unable to complete your request after several attempts."
+
+
+async def _resolve_with_tools(
+    prompt: str, mode: str, model: str, api_key: str, api_base: str, system: Optional[str]
+) -> str:
+    """Run the appropriate tool-calling loop and return the final answer text."""
+    messages = []
+    if system and mode not in ("anthropic",):
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    if mode == "local":
+        return await _llm_with_tools_local(messages, model or OLLAMA_MODEL)
+    if mode == "anthropic":
+        return await _llm_with_tools_anthropic(messages, system, model, api_key)
+    return await _llm_with_tools_openai(messages, model, api_key, api_base)
+
+
+async def _synth_text_to_audio(voice, text: str):
+    """Sentence-split a complete text string and yield WAV header + PCM chunks."""
+    yield _streaming_wav_header(voice.config.sample_rate)
+    splitter = StreamingSentenceSplitter(min_chars=12)
+    for sentence in splitter.feed(text):
+        for chunk in await _synth(voice, sentence):
+            yield chunk
+    if remaining := splitter.flush():
+        for chunk in await _synth(voice, remaining):
+            yield chunk
+
+
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Voice Pipeline", version="2.0.0")
+app = FastAPI(title="Voice Pipeline", version="2.1.0")
 
 
 class ChatRequest(BaseModel):
@@ -310,6 +459,7 @@ class ChatRequest(BaseModel):
     api_base: Optional[str] = None
     system: Optional[str] = None
     save_to: Optional[str] = None   # optional path to save WAV recording
+    use_tools: bool = False          # enable calendar/email tool calling
 
 
 class TtsRequest(BaseModel):
@@ -331,6 +481,49 @@ async def voice_chat(req: ChatRequest):
     llm_mode = req.mode or VOICE_MODE
     out_mode  = req.output or DEFAULT_OUTPUT
 
+    # ── Tool-calling path (non-streaming LLM, then synthesize final answer) ──
+    if req.use_tools:
+        final_text = await _resolve_with_tools(
+            req.prompt, llm_mode,
+            req.model or "", req.api_key or "", req.api_base or "", req.system,
+        )
+        log.info("Tool answer (%d chars): %s…", len(final_text), final_text[:80])
+
+        if out_mode == "stream":
+            return StreamingResponse(
+                _synth_text_to_audio(voice, final_text),
+                media_type="audio/wav",
+                headers={"Cache-Control": "no-cache"},
+            )
+
+        # speaker or both: synthesise all PCM, then play
+        splitter = StreamingSentenceSplitter(min_chars=12)
+        all_pcm  = b""
+        for sentence in splitter.feed(final_text):
+            all_pcm += b"".join(await _synth(voice, sentence))
+        if remaining := splitter.flush():
+            all_pcm += b"".join(await _synth(voice, remaining))
+
+        sr       = voice.config.sample_rate
+        duration = await _play_speaker(all_pcm, sr)
+        wav      = _make_wav(all_pcm, sr)
+
+        if req.save_to:
+            Path(req.save_to).write_bytes(wav)
+            log.info("Saved recording → %s", req.save_to)
+
+        if out_mode == "both":
+            return Response(content=wav, media_type="audio/wav")
+
+        return {
+            "status": "ok",
+            "text": final_text,
+            "duration_s": round(duration, 2),
+            "voice": req.voice,
+            "saved_to": req.save_to,
+        }
+
+    # ── Standard streaming path ───────────────────────────────────────────────
     if out_mode == "stream":
         return StreamingResponse(
             _output_stream(voice, req.prompt, llm_mode,
@@ -354,7 +547,6 @@ async def voice_chat(req: ChatRequest):
     if out_mode == "both":
         return Response(content=wav, media_type="audio/wav")
 
-    # speaker: return JSON summary
     return {
         "status": "ok",
         "text": text,
@@ -395,6 +587,11 @@ async def voice_tts(req: TtsRequest):
 
 @app.get("/health")
 def health():
+    cache_dir = Path.home() / ".local/share/jetson-ai/cache"
+    cache_files = {
+        p.stem: p.stat().st_mtime
+        for p in cache_dir.glob("*.json")
+    } if cache_dir.exists() else {}
     return {
         "status": "ok",
         "llm_mode": VOICE_MODE,
@@ -402,6 +599,7 @@ def health():
         "loaded_voices": list(_piper_cache.keys()),
         "ollama_host": OLLAMA_HOST if VOICE_MODE == "local" else None,
         "pulse_sink": PULSE_SINK or "default",
+        "tool_cache": {k: "present" for k in cache_files},
     }
 
 

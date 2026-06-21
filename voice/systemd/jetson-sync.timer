@@ -1,0 +1,11 @@
+[Unit]
+Description=Jetson AI — Periodic Calendar & Email Sync (every 15 min)
+Requires=jetson-sync.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=jetson-sync.service
+
+[Install]
+WantedBy=timers.target

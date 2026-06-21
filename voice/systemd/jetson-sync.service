@@ -1,0 +1,12 @@
+[Unit]
+Description=Jetson AI — Calendar & Email Data Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/gamma4_models
+EnvironmentFile=-%h/gamma4_models/.voice_env
+ExecStart=/usr/bin/python3 %h/gamma4_models/voice/data-sync.py both
+StandardOutput=append:%h/.local/share/jetson-ai/sync.log
+StandardError=append:%h/.local/share/jetson-ai/sync.log
