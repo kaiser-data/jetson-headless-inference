@@ -4,6 +4,10 @@
 __pycache__/
 .DS_Store
 
+# ── Voice models — large binaries, download via voice/download-models.sh ──────
+voice/models/*.onnx
+voice/models/*.onnx.json
+
 # ── Credentials — never commit these ──────────────────────────────────────────
 .voice_env
 .google_credentials.json
