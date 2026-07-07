@@ -42,8 +42,9 @@ declare -A TASK_MODEL=(
     [reasoning]="phi4-mini"
     [code]="qwen3.5:4b"
     [german]="cas/discolm-mfto-german:latest"
-    [vision]="gemma4:e2b"
-    [tiny]="qwen2.5:3b"
+    [vision]="gemma4:e2b-it-qat"
+    [vision-max]="gemma4:e4b-it-qat"
+    [tiny]="qwen3.5:0.8b"
     [chat]="llama3.2:3b"
     [quality]="llama3.1:8b"
 )
@@ -55,6 +56,7 @@ declare -A MODEL_GB=(
     [llama3.2:3b]=2.0    [llama3.1:8b]=4.9
     [qwen2.5:3b]=1.9     [gemma3:latest]=3.3
     [gemma4:e2b]=7.2     [gemma4:e4b]=9.6
+    [gemma4:e2b-it-qat]=4.3  [gemma4:e4b-it-qat]=6.1
     [cas/discolm-mfto-german:latest]=7.7
 )
 
@@ -575,15 +577,19 @@ cmd_list() {
     _row "qwen2.5:3b"                 1.9  "~22"   "Fast multilingual"
     _row "llama3.2:3b"                2.0  "~20"   "General chat"
     _row "phi4-mini ★"               2.5  "~18"   "Reasoning / math / agents"
+    _row "qwen3.5:2b"                 2.7  "~20"   "Light all-rounder"
     _row "qwen3.5:4b ★"              3.4  "~13"   "Best all-round (default)"
     _row "gemma3:latest"              3.3  "~12"   "Quality general"
+    _row "gemma4:e2b-it-qat"          4.3  "~9"    "Vision/multimodal (QAT)"
     _row "llama3.1:8b"               4.9  "~8"    "High quality (headless only)"
-    _row "gemma4:e2b"                 7.2  "~5"    "Vision/multimodal"
+    _row "gemma4:e4b-it-qat"          6.1  "~6"    "Best vision (headless only)"
     _row "cas/discolm-german"         7.7  "~4"    "German language"
-    _row "gemma4:e4b"                 9.6  "✗CPU"  "Too big — avoid"
+    _row "gemma4:e2b"                 7.2  "~5"    "Use e2b-it-qat instead (-2.9GB)"
+    _row "gemma4:e4b"                 9.6  "✗CPU"  "Too big — use e4b-it-qat"
     _sep
     _info "★ recommended  ✓ fits  ~ tight  ✗ CPU fallback"
     _info "* tok/s estimated headless + MAXN_SUPER power mode"
+    _info "-qat = quantization-aware training: ~60% RAM, near-identical quality"
     echo ""
     _info "Task aliases (use with start/switch):"
     for task in $(echo "${!TASK_MODEL[@]}" | tr ' ' '\n' | sort); do
@@ -675,8 +681,9 @@ cmd_tasks() {
     printf "  %-14s %-28s %s\n" "reasoning" "phi4-mini"           "Math, logic, step-by-step"
     printf "  %-14s %-28s %s\n" "code"     "qwen3.5:4b"           "Coding, debugging, review"
     printf "  %-14s %-28s %s\n" "german"   "cas/discolm-german"   "German language tasks"
-    printf "  %-14s %-28s %s\n" "vision"   "gemma4:e2b"           "Image understanding"
-    printf "  %-14s %-28s %s\n" "tiny"     "qwen2.5:3b"           "Fast, minimal RAM"
+    printf "  %-14s %-28s %s\n" "vision"   "gemma4:e2b-it-qat"    "Image understanding (4.3GB QAT)"
+    printf "  %-14s %-28s %s\n" "vision-max" "gemma4:e4b-it-qat"  "Best vision (6.1GB, headless)"
+    printf "  %-14s %-28s %s\n" "tiny"     "qwen3.5:0.8b"         "Ultra-fast, 1GB RAM"
     printf "  %-14s %-28s %s\n" "chat"     "llama3.2:3b"          "Casual conversation"
     printf "  %-14s %-28s %s\n" "quality"  "llama3.1:8b"          "Best output (headless only)"
     _sep
@@ -787,7 +794,7 @@ case "${1:-help}" in
         _info "  POST /bt/connect              connect BT speaker"
         _info "  PUT  /control/sink {sink}     switch audio output"
         _sep
-        _info "Task aliases: default fast reasoning code german vision tiny chat quality"
+        _info "Task aliases: default fast reasoning code german vision vision-max tiny chat quality"
         _sep
         _info "Memory budget:"
         _info "  local:  OS 0.5 + LLM 3.4 = 4.0 GB  (desktop off, GPU on)"

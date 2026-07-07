@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 640" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#9198a1"/>
+    </marker>
+    <marker id="arrowg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#76B900"/>
+    </marker>
+  </defs>
+
+  <!-- outer network boundary -->
+  <rect x="10" y="10" width="900" height="620" rx="16" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="34" y="40" font-size="12" font-weight="600" letter-spacing="2" fill="#9198a1">YOUR NETWORK · LAN / TAILSCALE</text>
+
+  <!-- Jetson board -->
+  <rect x="40" y="62" width="560" height="392" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <rect x="40" y="62" width="560" height="6" rx="3" fill="#76B900"/>
+  <text x="62" y="96" font-size="17" font-weight="700" fill="#e6edf3">NVIDIA Jetson Orin Nano 8GB</text>
+  <text x="62" y="114" font-size="11.5" fill="#9198a1">JetPack 6 · CUDA 12.6 · Ampere 1024 cores · MAXN_SUPER</text>
+
+  <!-- service chips -->
+  <!-- Ollama -->
+  <g>
+    <rect x="62" y="132" width="256" height="56" rx="8" fill="#0d1117" stroke="#30363d"/>
+    <rect x="62" y="132" width="5" height="56" rx="2.5" fill="#76B900"/>
+    <text x="80" y="155" font-size="13.5" font-weight="600" fill="#e6edf3">Ollama · GPU LLM</text>
+    <text x="80" y="176" font-size="10.5" fill="#9198a1">OpenAI-compatible chat + generate</text>
+    <text x="308" y="150" font-size="10.5" font-family="ui-monospace,Menlo,monospace" text-anchor="end" fill="#76B900" font-weight="600">:11434</text>
+  </g>
+  <!-- Voice pipeline -->
+  <g>
+    <rect x="62" y="200" width="256" height="56" rx="8" fill="#0d1117" stroke="#30363d"/>
+    <rect x="62" y="200" width="5" height="56" rx="2.5" fill="#4493f8"/>
+    <text x="80" y="223" font-size="13.5" font-weight="600" fill="#e6edf3">Voice pipeline</text>
+    <text x="80" y="244" font-size="10.5" fill="#9198a1">LLM → sentences → TTS · streaming WAV</text>
+    <text x="308" y="218" font-size="10.5" font-family="ui-monospace,Menlo,monospace" text-anchor="end" fill="#4493f8" font-weight="600">:8000</text>
+  </g>
+  <!-- Piper -->
+  <g>
+    <rect x="62" y="268" width="256" height="56" rx="8" fill="#0d1117" stroke="#30363d"/>
+    <rect x="62" y="268" width="5" height="56" rx="2.5" fill="#a371f7"/>
+    <text x="80" y="291" font-size="13.5" font-weight="600" fill="#e6edf3">Piper TTS</text>
+    <text x="80" y="312" font-size="10.5" fill="#9198a1">/v1/audio/speech · EN + DE voices</text>
+    <text x="308" y="286" font-size="10.5" font-family="ui-monospace,Menlo,monospace" text-anchor="end" fill="#a371f7" font-weight="600">:5500</text>
+  </g>
+  <!-- Control API -->
+  <g>
+    <rect x="62" y="336" width="256" height="56" rx="8" fill="#0d1117" stroke="#30363d"/>
+    <rect x="62" y="336" width="5" height="56" rx="2.5" fill="#f0883e"/>
+    <text x="80" y="359" font-size="13.5" font-weight="600" fill="#e6edf3">Control API</text>
+    <text x="80" y="380" font-size="10.5" fill="#9198a1">status · start/stop · switch · sync · audio</text>
+    <text x="308" y="354" font-size="10.5" font-family="ui-monospace,Menlo,monospace" text-anchor="end" fill="#f0883e" font-weight="600">:8080</text>
+  </g>
+
+  <!-- pipeline internal arrows -->
+  <path d="M 330 228 C 356 228 356 164 336 162" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)" opacity="0.55"/>
+  <path d="M 330 236 C 356 236 356 292 336 294" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)" opacity="0.55"/>
+
+  <!-- tool cache -->
+  <g>
+    <rect x="376" y="200" width="204" height="124" rx="8" fill="#0d1117" stroke="#30363d"/>
+    <text x="392" y="224" font-size="12.5" font-weight="600" fill="#e6edf3">LLM tools · read-only</text>
+    <text x="392" y="246" font-size="10.5" font-family="ui-monospace,Menlo,monospace" fill="#9198a1">get_calendar_events</text>
+    <text x="392" y="264" font-size="10.5" font-family="ui-monospace,Menlo,monospace" fill="#9198a1">get_emails · stats</text>
+    <text x="392" y="282" font-size="10.5" font-family="ui-monospace,Menlo,monospace" fill="#9198a1">get_current_datetime</text>
+    <text x="392" y="306" font-size="10" fill="#9198a1" font-style="italic">served from local JSON cache</text>
+  </g>
+
+  <path d="M 376 240 C 354 240 350 232 336 230" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)" opacity="0.55"/>
+
+  <!-- RAM bar -->
+  <text x="62" y="418" font-size="11" font-weight="600" fill="#9198a1">UNIFIED LPDDR5 — 8 GB @ 68 GB/s, shared by CPU + GPU</text>
+  <g>
+    <rect x="62" y="426" width="32" height="18" rx="3" fill="#9198a1" opacity="0.75"/>
+    <rect x="97" y="426" width="300" height="18" rx="3" fill="#76B900" opacity="0.85"/>
+    <rect x="400" y="426" width="118" height="18" rx="3" fill="#4493f8" opacity="0.7"/>
+    <rect x="521" y="426" width="57" height="18" rx="3" fill="#a371f7" opacity="0.7"/>
+    <text x="66" y="458" font-size="9.5" fill="#9198a1">OS 0.5G</text>
+    <text x="180" y="458" font-size="9.5" fill="#9198a1">model weights 1–5G</text>
+    <text x="410" y="458" font-size="9.5" fill="#9198a1">KV cache</text>
+    <text x="524" y="458" font-size="9.5" fill="#9198a1">TTS</text>
+  </g>
+
+  <!-- cloud sources -->
+  <g>
+    <rect x="650" y="90" width="230" height="74" rx="10" fill="none" stroke="#30363d" stroke-width="1.5"/>
+    <text x="670" y="118" font-size="13" font-weight="600" fill="#e6edf3">☁  Google Calendar</text>
+    <text x="670" y="142" font-size="13" font-weight="600" fill="#e6edf3">✉  IMAP inbox</text>
+  </g>
+  <!-- data-sync -->
+  <g>
+    <rect x="650" y="212" width="230" height="62" rx="10" fill="#0d1117" stroke="#30363d"/>
+    <text x="670" y="238" font-size="12.5" font-weight="600" fill="#e6edf3">data-sync.py</text>
+    <text x="670" y="258" font-size="10.5" fill="#9198a1">systemd timer · every 15 min</text>
+  </g>
+  <path d="M 765 164 L 765 206" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <path d="M 650 243 L 586 262" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)"/>
+
+  <!-- bluetooth speaker -->
+  <g>
+    <rect x="650" y="330" width="230" height="62" rx="10" fill="#0d1117" stroke="#30363d"/>
+    <text x="670" y="356" font-size="12.5" font-weight="600" fill="#e6edf3">♪  Bluetooth speaker</text>
+    <text x="670" y="376" font-size="10.5" fill="#9198a1">PulseAudio · auto-connect on boot</text>
+  </g>
+  <path d="M 602 361 L 644 361" fill="none" stroke="#76B900" stroke-width="1.6" marker-end="url(#arrowg)"/>
+
+  <!-- clients -->
+  <g>
+    <rect x="70" y="520" width="230" height="80" rx="10" fill="#0d1117" stroke="#30363d"/>
+    <text x="90" y="550" font-size="13" font-weight="600" fill="#e6edf3">Raspberry Pi</text>
+    <text x="90" y="572" font-size="10.5" fill="#9198a1">curl · Python requests</text>
+    <rect x="345" y="520" width="230" height="80" rx="10" fill="#0d1117" stroke="#30363d"/>
+    <text x="365" y="550" font-size="13" font-weight="600" fill="#e6edf3">Laptop</text>
+    <text x="365" y="572" font-size="10.5" fill="#9198a1">OpenAI SDK · drop-in base_url</text>
+    <rect x="620" y="520" width="230" height="80" rx="10" fill="#0d1117" stroke="#30363d"/>
+    <text x="640" y="550" font-size="13" font-weight="600" fill="#e6edf3">Phone</text>
+    <text x="640" y="572" font-size="10.5" fill="#9198a1">Tailscale · POST /speak</text>
+  </g>
+  <path d="M 185 514 L 185 462" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)" opacity="0.7"/>
+  <path d="M 460 514 L 460 462" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)" opacity="0.7"/>
+  <path d="M 735 514 L 735 484 L 608 462" fill="none" stroke="#9198a1" stroke-width="1.3" marker-end="url(#arrow)" opacity="0.7"/>
+</svg>

@@ -45,31 +45,10 @@
 
 ## 🏗️ Architecture
 
-```
-╔════════════════════════════════ YOUR NETWORK ════════════════════════════════╗
-║                                                                              ║
-║   ┌────────────────────── NVIDIA JETSON ORIN 8GB ──────────────────────┐    ║
-║   │                                                                     │    ║
-║   │   :11434  Ollama          GPU LLM — OpenAI-compatible REST          │    ║
-║   │   :5500   Piper TTS       /v1/audio/speech (OpenAI-compatible)      │    ║
-║   │   :8000   Voice pipeline  LLM → sentences → TTS, streaming WAV      │    ║
-║   │   :8080   Control API     status · start/stop · models · audio      │    ║
-║   │                                                                     │    ║
-║   │   ┌───────────────────────────────────────────────────────────┐    │    ║
-║   │   │   Unified LPDDR5 8 GB @ 68 GB/s  (CPU + GPU share it)     │    │    ║
-║   │   │   OS 0.5G │ model weights 1–5G │ KV cache │ TTS 0.1G      │    │    ║
-║   │   └───────────────────────────────────────────────────────────┘    │    ║
-║   │                                                                     │    ║
-║   │   data-sync (15-min timer) ──►  📅 Google Calendar   📧 IMAP        │    ║
-║   │        └──► local JSON cache ──► LLM tools (read-only)              │    ║
-║   │                                                                     │    ║
-║   │   🔊 Bluetooth speaker  ◄── PulseAudio ◄── pipeline "speaker" mode  │    ║
-║   └─────────────────────────────────────────────────────────────────────┘    ║
-║                    ▲                ▲                 ▲                       ║
-║              Raspberry Pi        laptop          phone (Tailscale)           ║
-║              curl / Python      OpenAI SDK       POST /speak                 ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
+  <img alt="Architecture: four services on the Jetson (Ollama :11434, voice pipeline :8000, Piper TTS :5500, control API :8080) sharing 8GB unified RAM, fed by a calendar/email sync timer, playing out via Bluetooth, reachable from Pi/laptop/phone clients" src="assets/architecture.svg" width="100%">
+</picture>
 
 ---
 
@@ -140,29 +119,41 @@ requires `Authorization: Bearer <token>`.
 
 ```
   MODEL SELECTION — RAM vs 8 GB LIMIT
-  ════════════════════════════════════════════════════════
-  qwen3.5:0.8b  ██░░░░░░░░░░░░░░  1.0GB  ~35 tok/s  ✓
-  qwen2.5:3b    █████░░░░░░░░░░░  1.9GB  ~22 tok/s  ✓
-  llama3.2:3b   █████░░░░░░░░░░░  2.0GB  ~20 tok/s  ✓
-  phi4-mini   ★ ██████░░░░░░░░░░  2.5GB  ~18 tok/s  ✓
-  gemma3        █████████░░░░░░░  3.3GB  ~12 tok/s  ✓
-  qwen3.5:4b  ★ █████████░░░░░░░  3.4GB  ~13 tok/s  ✓
-  llama3.1:8b   █████████████░░░  4.9GB  ~ 8 tok/s  ○
-  gemma4:e2b    ████████████████  7.2GB  ~ 5 tok/s  ○
-  gemma4:e4b    ██████████████████████  9.6GB  ✗ too large
-                ├────────┬───────┼───────────────────┤
-                0       2GB    4GB                  8GB
+  ═══════════════════════════════════════════════════════════════
+  qwen3.5:0.8b       ██░░░░░░░░░░░░░░  1.0GB  ~35 tok/s  ✓
+  qwen2.5:3b         █████░░░░░░░░░░░  1.9GB  ~22 tok/s  ✓
+  llama3.2:3b        █████░░░░░░░░░░░  2.0GB  ~20 tok/s  ✓
+  phi4-mini        ★ ██████░░░░░░░░░░  2.5GB  ~18 tok/s  ✓
+  qwen3.5:2b         ███████░░░░░░░░░  2.7GB  ~20 tok/s  ✓
+  gemma3             █████████░░░░░░░  3.3GB  ~12 tok/s  ✓
+  qwen3.5:4b       ★ █████████░░░░░░░  3.4GB  ~13 tok/s  ✓
+  gemma4:e2b-it-qat  ███████████░░░░░  4.3GB  ~ 9 tok/s  ✓  vision
+  llama3.1:8b        █████████████░░░  4.9GB  ~ 8 tok/s  ○
+  gemma4:e4b-it-qat  ███████████████░  6.1GB  ~ 6 tok/s  ○  vision
+  gemma4:e2b (fp)    ████████████████  7.2GB  ~ 5 tok/s  ○  use -qat!
+  gemma4:e4b (fp)    ██████████████████████  9.6GB  ✗ too large
+                     ├────────┬───────┼──────────────────┤
+                     0       2GB    4GB                 8GB
 
   ✓ fits always   ○ headless only   ✗ avoid (CPU fallback)   ★ recommended
 ```
 
+> 💡 **The `-qat` trick.** Gemma 4's quantization-aware-training builds are the
+> same model at ~60% of the RAM with near-identical quality:
+> `gemma4:e2b-it-qat` is **4.3 GB vs 7.2 GB** — vision goes from "barely fits
+> headless" to "fits comfortably", and `e4b-it-qat` (6.1 GB) fits headless where
+> the full-precision 9.6 GB never did. Ollama's default tags are already
+> Q4_K_M — the edge-optimal quantization — so avoid `q8` variants on 8 GB.
+
 Task aliases route to the right model automatically:
 
 ```bash
-./jetson-ai.sh start reasoning   # phi4-mini      math & logic
-./jetson-ai.sh switch code       # qwen3.5:4b     coding
-./jetson-ai.sh switch german     # discolm-german deutsch, bitte
-./jetson-ai.sh switch vision     # gemma4:e2b     images
+./jetson-ai.sh start reasoning    # phi4-mini            math & logic
+./jetson-ai.sh switch code        # qwen3.5:4b           coding
+./jetson-ai.sh switch tiny        # qwen3.5:0.8b         ultra-fast, 1 GB
+./jetson-ai.sh switch german      # discolm-german       deutsch, bitte
+./jetson-ai.sh switch vision      # gemma4:e2b-it-qat    images, QAT
+./jetson-ai.sh switch vision-max  # gemma4:e4b-it-qat    best vision (headless)
 ```
 
 > ⚠️ **The silent CPU-fallback trap.** A model that doesn't fit in GPU RAM
