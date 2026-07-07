@@ -1,182 +1,146 @@
-# Jetson Orin 8GB — Headless AI API
+<div align="center">
 
-Run local LLMs as a **LAN API endpoint** on NVIDIA Jetson Orin 8GB.  
-Switch between headless AI mode and normal Ubuntu desktop with one command.
+# 🤖 Jetson Voice AI
 
-**Hardware:** Jetson Orin Nano 8GB · LPDDR5 68 GB/s · CUDA 12.6 · JetPack 6.x  
-**Backend:** [Ollama](https://ollama.com) · OpenAI-compatible REST API
+### A fully local, voice-enabled AI assistant on a $250 board
 
----
+**LLM inference · streaming text-to-speech · calendar & email agent · remote control API**
+— all self-hosted on an NVIDIA Jetson Orin Nano 8GB, no cloud required.
 
-## Table of Contents
-- [Architecture](#architecture)
-- [Memory Layout](#memory-layout)
-- [Mode Flow](#mode-flow)
-- [Quick Start](#quick-start)
-- [Model Guide](#model-guide)
-- [Optimization Stack](#optimization-stack)
-- [API Usage](#api-usage)
-- [Boot Menu](#boot-menu)
-- [Test Suite](#test-suite)
-- [Troubleshooting](#troubleshooting)
+![Jetson](https://img.shields.io/badge/NVIDIA-Jetson_Orin_8GB-76B900?logo=nvidia&logoColor=white)
+![Ollama](https://img.shields.io/badge/LLM-Ollama-black)
+![Piper](https://img.shields.io/badge/TTS-Piper-blueviolet)
+![Python](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900)
+
+*Ask it what's on your calendar. It checks. Then it talks back — through a Bluetooth speaker.*
+
+</div>
 
 ---
 
-## Architecture
+## ✨ What's in the box
+
+| | Feature | How |
+|---|---|---|
+| 🧠 | **Local LLM API** | Ollama on GPU, OpenAI-compatible, reachable from any device on your LAN |
+| 🗣️ | **Streaming voice replies** | LLM tokens → sentence splitter → Piper TTS, audio starts before the answer is finished |
+| 📅 | **Tool-calling agent** | The LLM reads your Google Calendar & IMAP inbox via a local cache — *"any emails that need a reply?"* |
+| 🎛️ | **Remote control API** | Start/stop modes, hot-swap models, route audio, trigger syncs — from your phone via Tailscale |
+| 🔊 | **Bluetooth speaker out** | Auto-connects on boot, answers play in the room, not just over HTTP |
+| ⚡ | **One-command headless mode** | Kills the desktop, maxes the clocks, frees 1.5 GB for model weights |
+| 🔁 | **Survives reboots** | systemd user services + a login boot menu, zero babysitting |
+| 🔐 | **Optional API auth** | One env var (`VOICE_API_TOKEN`) locks every endpoint behind a bearer token |
+
+## 🚦 Three modes, one script
 
 ```
-╔═══════════════════════════════════════════════════════════════════╗
-║                    YOUR HOME / LAB NETWORK                        ║
-║                                                                   ║
-║  ┌────────────────────────────────────────────────────────────┐  ║
-║  │              NVIDIA JETSON ORIN  8GB                       │  ║
-║  │                                                            │  ║
-║  │  ┌─────────────────────────────────────────────────────┐  │  ║
-║  │  │  Ampere GPU (1024 CUDA cores)                       │  │  ║
-║  │  │  ◄──────────────────────────────────────────────►   │  │  ║
-║  │  │  ARM Cortex-A78AE  6-core CPU   MAXN_SUPER mode     │  │  ║
-║  │  └───────────────────────┬─────────────────────────────┘  │  ║
-║  │                          │                                 │  ║
-║  │  ╔═══════════════════════▼═══════════════════════════╗    │  ║
-║  │  ║      Unified LPDDR5 RAM — 8 GB  @  68 GB/s        ║    │  ║
-║  │  ║  ┌────────┬──────────────────────┬────────────┐   ║    │  ║
-║  │  ║  │OS 0.5G │  Model weights 2–7GB │  KV cache  │   ║    │  ║
-║  │  ║  └────────┴──────────────────────┴────────────┘   ║    │  ║
-║  │  ╚═══════════════════════════════════════════════════╝    │  ║
-║  │                                                            │  ║
-║  │  ┌──────────────────────────────────────────────────┐     │  ║
-║  │  │  ollama serve  →  0.0.0.0:11434                  │     │  ║
-║  │  │  ├── /api/generate          ollama native         │     │  ║
-║  │  │  ├── /v1/chat/completions   OpenAI-compatible     │     │  ║
-║  │  │  └── /api/ps                model status          │     │  ║
-║  │  └──────────────────────────────────────────────────┘     │  ║
-║  │                     192.168.0.115:11434                    │  ║
-║  └────────────────────────────────────────────────────────────┘  ║
-║                              │                                    ║
-║          ┌───────────────────┼──────────────────┐                ║
-║          ▼                   ▼                  ▼                ║
-║   ┌─────────────┐    ┌─────────────┐    ┌────────────┐          ║
-║   │Raspberry Pi │    │   Laptop    │    │ Any Device │          ║
-║   │192.168.0.148│    │             │    │            │          ║
-║   │ curl/Python │    │ OpenAI SDK  │    │HTTP client │          ║
-║   └─────────────┘    └─────────────┘    └────────────┘          ║
-╚═══════════════════════════════════════════════════════════════════╝
+./jetson-ai.sh start          →  🧠  local LLM API only          (max GPU for the model)
+./jetson-ai.sh start voice    →  🧠 + 🗣️  local LLM + voice       (the full assistant)
+./jetson-ai.sh start api      →  ☁️ + 🗣️  cloud LLM + local voice  (0.6 GB RAM, desktop stays on)
 ```
 
 ---
 
-## Memory Layout
-
-The Jetson uses **unified memory** — CPU and GPU share the same physical pool.  
-Stopping the desktop frees 1.5 GB, allowing larger models to run fully on GPU.
+## 🏗️ Architecture
 
 ```
-  ┌─────────────────────────────────────────────────────────────┐
-  │                  8 GB Unified RAM                           │
-  ├─────────────────────────────────────────────────────────────┤
-  │                                                             │
-  │  NORMAL MODE  (desktop running)                             │
-  │  ┌──────┬──────────┬──────────────────────────────────┐    │
-  │  │  OS  │  GNOME   │       Model space                │    │
-  │  │ 0.5G │  1.5 GB  │         ~ 6.0 GB free            │    │
-  │  └──────┴──────────┴──────────────────────────────────┘    │
-  │                                                             │
-  │  HEADLESS MODE  (./jetson-ai.sh start)                      │
-  │  ┌──────┬──────────────────────────────────────────────┐    │
-  │  │  OS  │             Model space                      │    │
-  │  │ 0.5G │               ~ 7.1 GB free                  │    │
-  │  └──────┴──────────────────────────────────────────────┘    │
-  │          ▲ +1.5 GB gained by stopping desktop               │
-  └─────────────────────────────────────────────────────────────┘
-
-  ⚠  Silent CPU Fallback Trap:
-     Model too big for GPU  →  Ollama silently uses CPU
-     GPU inference:  13–35 tok/s  ✓
-     CPU inference:   0.3 tok/s  ✗  (100× slower, unusable)
-     The bench command detects and warns about this automatically.
+╔════════════════════════════════ YOUR NETWORK ════════════════════════════════╗
+║                                                                              ║
+║   ┌────────────────────── NVIDIA JETSON ORIN 8GB ──────────────────────┐    ║
+║   │                                                                     │    ║
+║   │   :11434  Ollama          GPU LLM — OpenAI-compatible REST          │    ║
+║   │   :5500   Piper TTS       /v1/audio/speech (OpenAI-compatible)      │    ║
+║   │   :8000   Voice pipeline  LLM → sentences → TTS, streaming WAV      │    ║
+║   │   :8080   Control API     status · start/stop · models · audio      │    ║
+║   │                                                                     │    ║
+║   │   ┌───────────────────────────────────────────────────────────┐    │    ║
+║   │   │   Unified LPDDR5 8 GB @ 68 GB/s  (CPU + GPU share it)     │    │    ║
+║   │   │   OS 0.5G │ model weights 1–5G │ KV cache │ TTS 0.1G      │    │    ║
+║   │   └───────────────────────────────────────────────────────────┘    │    ║
+║   │                                                                     │    ║
+║   │   data-sync (15-min timer) ──►  📅 Google Calendar   📧 IMAP        │    ║
+║   │        └──► local JSON cache ──► LLM tools (read-only)              │    ║
+║   │                                                                     │    ║
+║   │   🔊 Bluetooth speaker  ◄── PulseAudio ◄── pipeline "speaker" mode  │    ║
+║   └─────────────────────────────────────────────────────────────────────┘    ║
+║                    ▲                ▲                 ▲                       ║
+║              Raspberry Pi        laptop          phone (Tailscale)           ║
+║              curl / Python      OpenAI SDK       POST /speak                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-## Mode Flow
-
-```mermaid
-flowchart TD
-    A([🔐 SSH / TTY Login]) --> B
-
-    subgraph MENU ["Boot Menu — 10s timeout"]
-        B{Choice?}
-        B -->|1 - default| C[🖥️ Start Desktop]
-        B -->|2 / 3 / 4| D[⚡ AI API Mode]
-        B -->|5| Z[💻 Shell only]
-    end
-
-    subgraph START ["./jetson-ai.sh start"]
-        D --> E[🔋 MAXN_SUPER power\nnvpmodel -m 2\njetson_clocks]
-        E --> F[🖥️ Stop GNOME\n+1.5 GB RAM freed]
-        F --> G{🧠 GPU fit\ncheck}
-        G -->|✓ fits| H[Load model\ninto GPU RAM]
-        G -->|⚠ tight| H
-        G -->|✗ too big| X[⚠️ CPU fallback\n0.3 tok/s — use smaller model]
-    end
-
-    subgraph API ["API Ready"]
-        H --> I[🌐 LAN endpoint\n192.168.0.115:11434\nOpenAI-compatible]
-    end
-
-    subgraph LIVE ["While Running"]
-        I --> J{Command}
-        J -->|switch| K[🔄 Hot-swap model\n~20 seconds\nauto-pull if missing]
-        K --> I
-        J -->|bench| L[📊 3-run benchmark\ntok/s + GPU% check]
-        L --> I
-    end
-
-    subgraph STOP ["./jetson-ai.sh stop"]
-        J -->|stop| M[💾 Unload model\nfrom RAM]
-        M --> N[🔋 Restore power\nmode 15W]
-        N --> O[🖥️ Start GNOME\nDesktop back]
-    end
-
-    style X fill:#ff6b6b,color:#fff
-    style H fill:#51cf66,color:#fff
-    style I fill:#339af0,color:#fff
-```
-
----
-
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
-# 1. First-time setup — run once (needs sudo password)
+# 0. One-time: sudoers rules + Ollama performance drop-in (needs password once)
 ./jetson-ai.sh setup
 
-# 2. Start headless AI API
-./jetson-ai.sh start               # default: qwen3.5:4b
-./jetson-ai.sh start reasoning     # phi4-mini (task alias)
-./jetson-ai.sh start quality       # llama3.1:8b (headless only)
+# 1. Voice models (~240 MB, not in git)
+bash voice/download-models.sh
 
-# 3. Swap model on the fly — no restart needed
-./jetson-ai.sh switch code         # → qwen3.5:4b
-./jetson-ai.sh switch fast         # → phi4-mini
-./jetson-ai.sh switch vision       # → gemma4:e2b
+# 2. Fire it up
+./jetson-ai.sh start voice          # local LLM + TTS
+./jetson-ai.sh status               # everything at a glance
 
-# 4. Benchmark
-./jetson-ai.sh bench
-
-# 5. Restore Ubuntu desktop
-./jetson-ai.sh stop
+# 3. Make it talk
+curl -X POST http://<jetson-ip>:8000/voice/chat \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain edge AI in one sentence.","voice":"en","output":"speaker"}'
 ```
+
+Want it permanent? `./jetson-ai.sh install-services` — every component becomes a
+systemd user service that starts on login and restarts on failure.
+
+### 🗓️ The agent part
+
+```bash
+# One-time: Google OAuth (device flow, works headless) + IMAP creds
+cp voice/config.template.env .voice_env    # fill in credentials
+python3 voice/setup-google-auth.py
+
+# Sync runs every 15 min via systemd timer, or on demand:
+curl -X POST http://<jetson-ip>:8080/sync -d '{"target":"both"}'
+
+# Now ask questions that need your data:
+curl -X POST http://<jetson-ip>:8080/speak \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"What is on my calendar today, and do any emails need a reply?","use_tools":true}'
+```
+
+The LLM gets four **read-only** tools — `get_current_datetime`, `get_calendar_events`,
+`get_emails`, `get_email_stats` — served from a local JSON cache. Your credentials
+never touch the model, and nothing can write or send.
 
 ---
 
-## Model Guide
+## 🎛️ Remote Control API (port 8080)
+
+Control the whole box from anywhere on your tailnet:
+
+| Endpoint | Does |
+|---|---|
+| `GET /status` | RAM, power mode, model, GPU%, BT, audio sinks — one call |
+| `POST /speak` | `{prompt}` → Jetson answers out loud, returns transcript |
+| `POST /control/start` `{mode}` | Boot a mode remotely (local / voice / api) |
+| `POST /control/switch` `{model}` | Hot-swap the LLM (~20 s) |
+| `PUT /control/sink` `{sink}` | Route audio: HDMI ↔ Bluetooth ↔ USB |
+| `POST /bt/connect` | Connect BT speaker + auto-set as default sink |
+| `POST /sync` | Refresh calendar/email cache |
+
+🔐 Set `VOICE_API_TOKEN` in `.voice_env` and every endpoint (except `/health`)
+requires `Authorization: Bearer <token>`.
+
+---
+
+## 📊 Model Guide
 
 ```
   MODEL SELECTION — RAM vs 8 GB LIMIT
   ════════════════════════════════════════════════════════
-                                              headless
-                                    desktop   only
   qwen3.5:0.8b  ██░░░░░░░░░░░░░░  1.0GB  ~35 tok/s  ✓
   qwen2.5:3b    █████░░░░░░░░░░░  1.9GB  ~22 tok/s  ✓
   llama3.2:3b   █████░░░░░░░░░░░  2.0GB  ~20 tok/s  ✓
@@ -188,118 +152,62 @@ flowchart TD
   gemma4:e4b    ██████████████████████  9.6GB  ✗ too large
                 ├────────┬───────┼───────────────────┤
                 0       2GB    4GB                  8GB
-                         ▲ desktop  ▲ headless limit
-                         6GB free   7.1GB free
 
-  ✓ fits always   ○ headless only   ✗ avoid (CPU fallback)
-  ★ recommended
+  ✓ fits always   ○ headless only   ✗ avoid (CPU fallback)   ★ recommended
 ```
 
-### Task Aliases
+Task aliases route to the right model automatically:
 
-| Alias | Model | Why |
+```bash
+./jetson-ai.sh start reasoning   # phi4-mini      math & logic
+./jetson-ai.sh switch code       # qwen3.5:4b     coding
+./jetson-ai.sh switch german     # discolm-german deutsch, bitte
+./jetson-ai.sh switch vision     # gemma4:e2b     images
+```
+
+> ⚠️ **The silent CPU-fallback trap.** A model that doesn't fit in GPU RAM
+> still *runs* — at 0.3 tok/s instead of 13–35. `./jetson-ai.sh bench` and
+> `status` detect it and tell you before you waste an afternoon.
+
+---
+
+## ⚡ Why it's fast on 8 GB
+
+Six stacked optimizations, applied automatically by `start`:
+
+| # | Trick | Gain |
 |---|---|---|
-| `default` | qwen3.5:4b | Best quality/speed balance |
-| `fast` | phi4-mini | Lowest latency |
-| `reasoning` | phi4-mini | Math, logic, step-by-step |
-| `code` | qwen3.5:4b | Coding & debugging |
-| `vision` | gemma4:e2b | Image understanding |
-| `german` | cas/discolm-german | German language |
-| `tiny` | qwen2.5:3b | Minimal RAM, fast |
-| `quality` | llama3.1:8b | Best output (headless only) |
+| 1 | `nvpmodel -m 2` + `jetson_clocks` (MAXN_SUPER) | ~2× clocks |
+| 2 | Stop GNOME while serving | +1.5 GB for weights |
+| 3 | `OLLAMA_FLASH_ATTENTION=1` | −30–50% KV cache |
+| 4 | `OLLAMA_KV_CACHE_TYPE=q8_0` | KV cache halved again |
+| 5 | `OLLAMA_KEEP_ALIVE=-1` | zero reload between requests |
+| 6 | systemd drop-in | all of it survives reboots |
+
+`./jetson-ai.sh stop` reverses everything — desktop back, power mode restored.
 
 ---
 
-## Optimization Stack
+## 🔌 Use it like OpenAI
 
-```
-  ╔══════════════════════════════════════════════════════════════╗
-  ║               SPEED OPTIMIZATION STACK                       ║
-  ╠══════════════════════════════════════════════════════════════╣
-  ║                                                              ║
-  ║  BEFORE  (defaults)                                          ║
-  ║  ┌──────────────────────────────────────────────────────┐   ║
-  ║  │ 15W mode · GNOME running · 5-min evict · no flash    │   ║
-  ║  │ ~6 GB free · ~4–6 tok/s · CPU fallback risk: HIGH   │   ║
-  ║  └──────────────────────────────────────────────────────┘   ║
-  ║                           ▼                                  ║
-  ║  ➊  MAXN_SUPER power      nvpmodel -m 2 + jetson_clocks      ║
-  ║     └─ 2× faster GPU/CPU clocks, uncapped power budget       ║
-  ║                           ▼                                  ║
-  ║  ➋  Stop GNOME desktop    systemctl stop gdm3                ║
-  ║     └─ +1.5 GB RAM freed for model weights                   ║
-  ║                           ▼                                  ║
-  ║  ➌  Flash Attention       OLLAMA_FLASH_ATTENTION=1           ║
-  ║     └─ −30 to 50% KV cache memory (CUDA optimized)          ║
-  ║                           ▼                                  ║
-  ║  ➍  KV cache quant        OLLAMA_KV_CACHE_TYPE=q8_0          ║
-  ║     └─ halves KV cache RAM, negligible quality loss          ║
-  ║                           ▼                                  ║
-  ║  ➎  Model pinned          OLLAMA_KEEP_ALIVE=-1               ║
-  ║     └─ 0 s reload delay between requests                     ║
-  ║                           ▼                                  ║
-  ║  ➏  Systemd drop-in       /etc/systemd/system/ollama.d/      ║
-  ║     └─ settings persist across reboots & service restarts    ║
-  ║                           ▼                                  ║
-  ║  AFTER   (./jetson-ai.sh start)                              ║
-  ║  ┌──────────────────────────────────────────────────────┐   ║
-  ║  │ MAXN mode · headless · model pinned · flash attn on  │   ║
-  ║  │ ~7 GB free · 12–35 tok/s · CPU fallback risk: LOW   │   ║
-  ║  └──────────────────────────────────────────────────────┘   ║
-  ╚══════════════════════════════════════════════════════════════╝
-```
+Drop-in compatible — point any OpenAI SDK at the Jetson:
 
----
-
-## API Usage
-
-The API is fully OpenAI-compatible — works as a drop-in for existing apps.
-
-### Python — OpenAI SDK
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://192.168.0.115:11434/v1",
-    api_key="ollama"          # any string, not validated
-)
-response = client.chat.completions.create(
+client = OpenAI(base_url="http://<jetson-ip>:11434/v1", api_key="ollama")
+r = client.chat.completions.create(
     model="qwen3.5:4b",
-    messages=[{"role": "user", "content": "Explain edge AI in 2 sentences."}]
+    messages=[{"role": "user", "content": "Explain edge AI in 2 sentences."}],
 )
-print(response.choices[0].message.content)
+print(r.choices[0].message.content)
 ```
 
-### Python — requests (streaming)
-```python
-import requests, json
-
-with requests.post("http://192.168.0.115:11434/api/generate",
-    json={"model": "qwen3.5:4b", "prompt": "Count to 5", "stream": True},
-    stream=True) as r:
-    for line in r.iter_lines():
-        if line:
-            print(json.loads(line).get("response", ""), end="", flush=True)
-```
-
-### curl
-```bash
-curl http://192.168.0.115:11434/api/generate \
-  -d '{"model":"qwen3.5:4b","prompt":"Hello!","stream":false}'
-```
-
-### From Raspberry Pi (192.168.0.148)
-```bash
-curl http://192.168.0.115:11434/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.5:4b","messages":[{"role":"user","content":"Hi!"}]}'
-```
+Piper speaks OpenAI too — `POST :5500/v1/audio/speech` with `{"model":"en","input":"..."}`.
 
 ---
 
-## Boot Menu
-
-Add to `~/.bashrc` to get a mode selector on every login:
+## 🖥️ Boot Menu
 
 ```bash
 echo "source $(pwd)/boot-choice.sh" >> ~/.bashrc   # run from the repo root
@@ -315,84 +223,71 @@ echo "source $(pwd)/boot-choice.sh" >> ~/.bashrc   # run from the repo root
   ║  [4] AI API  — choose model                  ║
   ║  [5] Shell only (no desktop/AI)              ║
   ╚══════════════════════════════════════════════╝
-
   Auto-starting [1] in 10s ... (press 1-5 to change)
 ```
 
-- Remembers your last choice
-- Skip for one session: `JETSON_AI_SKIP_MENU=1 bash`
-- Skipped automatically inside desktop sessions
+Remembers your last choice · skip once with `JETSON_AI_SKIP_MENU=1` · never shows inside desktop sessions.
 
 ---
 
-## Test Suite
-
-Auto-detects all installed models, runs 2-prompt benchmark each, checks GPU placement:
+## 🧪 Test Suite
 
 ```bash
-./test-models.sh            # test all installed models
-./test-models.sh phi4-mini  # test one specific model
+./test-models.sh              # benchmark every installed model, flag CPU fallback
 ```
 
 ```
-  Jetson AI — Model Test Suite
-  Date  : 2026-05-21 12:00
-  Power : MAXN_SUPER
-  RAM   : 7.0G free
-  Models: 5 to test
-  ────────────────────────────────────────────────────────────
   Model                               Result
-  ────────────────────────────────────────────────────────────
-  qwen2.5:3b                          ✓ PASS  22.1 tok/s  GPU:94%  1.9GB
-  phi4-mini:latest                    ✓ PASS  18.3 tok/s  GPU:91%  2.5GB
-  qwen3.5:4b                          ✓ PASS  13.1 tok/s  GPU:88%  3.4GB
-  gemma4:e2b                          ⚠ WARN  slow (4.8 tok/s, GPU:42%)
-  gemma4:e4b                          ✗ FAIL  CPU fallback (0.3 tok/s, GPU:0%)
-  ────────────────────────────────────────────────────────────
-  ✓ 3 passed    ⚠ 1 warning    ✗ 1 failed
+  ────────────────────────────────────────────────────────
+  qwen2.5:3b                          ✓ PASS  22.1 tok/s  GPU:94%
+  phi4-mini:latest                    ✓ PASS  18.3 tok/s  GPU:91%
+  qwen3.5:4b                          ✓ PASS  13.1 tok/s  GPU:88%
+  gemma4:e4b                          ✗ FAIL  CPU fallback (0.3 tok/s)
 ```
 
 ---
 
-## Troubleshooting
+## 🩹 Troubleshooting
 
-| Problem | Symptom | Fix |
-|---|---|---|
-| `sudo: password required` | Scripts pause/fail | Run `./jetson-ai.sh setup` first |
-| CPU fallback | `bench` shows < 2 tok/s | Run `stop` then `start` (stops desktop) |
-| Model load timeout | `start` hangs >90s | Try smaller model: `phi4-mini` |
-| Desktop doesn't restore | Black screen after `stop` | `sudo systemctl start gdm3` |
-| API not reachable from LAN | Connection refused on other device | Check: `systemctl show ollama \| grep OLLAMA_HOST` |
-| Port already in use | Error on start | `sudo systemctl restart ollama` |
-| No GPU detected | `nvpmodel` not found | JetPack not fully installed |
-
----
-
-## Comparison vs Alternatives
-
-| | **This setup** | **NanoLLM** | **llama.cpp** |
-|---|---|---|---|
-| Speed | Good (MAXN + flash attn) | Best (TensorRT-LLM) | ~10% faster than ollama |
-| OpenAI API compat | ✓ native | ✗ | needs wrapper |
-| Model switching | 1 command, ~20s | manual | manual |
-| Desktop restore | automatic | manual | manual |
-| Vision / multimodal | ✓ gemma4 | ✓ | partial |
-| Install effort | Low (done) | High (Docker + CUDA builds) | Medium |
-| LAN API server | ✓ built-in | ✗ | needs extra server |
-| Persists across reboots | ✓ systemd | manual | manual |
-
----
-
-## Files
-
-| File | Purpose |
+| Symptom | Fix |
 |---|---|
-| `jetson-ai.sh` | Main controller — all commands |
-| `boot-choice.sh` | Login menu (desktop ↔ AI API) |
-| `test-models.sh` | Automated model test suite |
-
-State and logs saved to `~/.local/share/jetson-ai/`
+| Scripts ask for sudo password | `./jetson-ai.sh setup` (one time) |
+| `bench` shows < 2 tok/s | CPU fallback — `stop` then `start` to free RAM |
+| Black screen after `stop` | `sudo systemctl start gdm3` |
+| API unreachable from LAN | `systemctl show ollama \| grep OLLAMA_HOST` |
+| No audio on speaker mode | `GET :8080/control/sinks`, then `PUT /control/sink` |
+| Calendar/email tools say "cache empty" | `python3 voice/data-sync.py` or `POST :8080/sync` |
 
 ---
 
-**Hardware tested:** NVIDIA Jetson Orin Nano 8GB · JetPack 6.4.7 (R36) · CUDA 12.6 · Ollama 0.21+
+## 📁 Layout
+
+```
+jetson-ai.sh                 the controller — setup/start/stop/switch/bench/services
+boot-choice.sh               login boot menu
+test-models.sh               model test suite
+voice/
+├── voice-pipeline.py        :8000  LLM → sentence split → Piper, streaming WAV
+├── piper-service.py         :5500  OpenAI-compatible TTS
+├── control-api.py           :8080  remote control & status
+├── tools.py                 LLM tool defs (calendar/email, read-only)
+├── data-sync.py             Google Calendar + IMAP → local JSON cache
+├── setup-google-auth.py     one-time OAuth device flow
+├── sentence_splitter.py     streaming sentence-boundary detector (EN/DE)
+├── download-models.sh       fetch Piper voices (~240 MB)
+├── bt-connect.sh            Bluetooth speaker auto-connect
+├── config.template.env      → copy to .voice_env, add credentials
+└── systemd/                 user services + 15-min sync timer
+```
+
+State, logs, cache and recordings live in `~/.local/share/jetson-ai/`.
+
+---
+
+<div align="center">
+
+**Hardware:** NVIDIA Jetson Orin Nano 8GB · JetPack 6.x · CUDA 12.6 · LPDDR5 68 GB/s
+
+*Built for the shelf, not the cloud.* 🏠
+
+</div>
