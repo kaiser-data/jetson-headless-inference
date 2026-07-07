@@ -16,7 +16,7 @@ You also need a Google Cloud project with the Calendar API enabled:
   3. Enable "Google Calendar API"
   4. Go to APIs & Services → Credentials → Create → OAuth client ID
      Type: Desktop app (or "TV and Limited Input" for pure device flow)
-  5. Download the JSON → save as ~/gamma4_models/.google_credentials.json
+  5. Download the JSON → save as .google_credentials.json in the repo root
 
 Then run:
   python3 voice/setup-google-auth.py
@@ -26,7 +26,7 @@ import json
 import sys
 from pathlib import Path
 
-CREDS_FILE = Path.home() / "gamma4_models" / ".google_credentials.json"
+CREDS_FILE = Path(__file__).resolve().parent.parent / ".google_credentials.json"
 TOKEN_FILE = Path.home() / ".local/share/jetson-ai" / "google_token.json"
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
@@ -75,6 +75,7 @@ def main():
         creds = flow.credentials
 
     TOKEN_FILE.write_text(creds.to_json())
+    TOKEN_FILE.chmod(0o600)
     print()
     print(f"Token saved to: {TOKEN_FILE}")
     print("Run 'python3 voice/data-sync.py calendar' to test.")

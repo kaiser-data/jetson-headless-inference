@@ -51,7 +51,19 @@ OLLAMA_URL   = os.getenv("OLLAMA_URL",    "http://localhost:11434")
 BT_SPEAKER_MAC  = os.getenv("BT_SPEAKER_MAC",  "88:88:11:07:10:5C")
 BT_SPEAKER_NAME = os.getenv("BT_SPEAKER_NAME", "Boomcore P06")
 
+# Optional bearer token — if set, all endpoints except /health require
+# "Authorization: Bearer <token>". Leave empty for open LAN/Tailscale use.
+API_TOKEN = os.getenv("VOICE_API_TOKEN", "")
+
 app = FastAPI(title="Jetson AI Control", version="1.0.0")
+
+
+@app.middleware("http")
+async def _auth_middleware(request, call_next):
+    if API_TOKEN and request.url.path != "/health":
+        if request.headers.get("authorization") != f"Bearer {API_TOKEN}":
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 # ── System info helpers ───────────────────────────────────────────────────────
@@ -180,17 +192,19 @@ class SpeakRequest(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     system: Optional[str] = None
-    save_to: Optional[str] = None       # optional path to record WAV
+    save_to: Optional[str] = None       # filename — pipeline saves under its recordings dir
+    use_tools: bool = False             # enable calendar/email tool calling
 
 
 @app.post("/speak")
 async def speak(req: SpeakRequest):
     """Send a prompt — Jetson speaks it through local speakers, returns transcript."""
     body = {
-        "prompt":  req.prompt,
-        "voice":   req.voice,
-        "output":  "speaker",
-        "save_to": req.save_to,
+        "prompt":    req.prompt,
+        "voice":     req.voice,
+        "output":    "speaker",
+        "save_to":   req.save_to,
+        "use_tools": req.use_tools,
     }
     if req.mode:    body["mode"]    = req.mode
     if req.model:   body["model"]   = req.model

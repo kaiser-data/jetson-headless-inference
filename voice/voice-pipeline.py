@@ -71,6 +71,13 @@ DEFAULT_OUTPUT = os.getenv("VOICE_OUTPUT", "stream")
 # PulseAudio sink override (empty = system default)
 PULSE_SINK = os.getenv("PULSE_SINK", "")
 
+# Optional bearer token — if set, all endpoints except /health require
+# "Authorization: Bearer <token>". Leave empty for open LAN/Tailscale use.
+API_TOKEN = os.getenv("VOICE_API_TOKEN", "")
+
+# save_to recordings land here — callers supply a filename, never a path
+RECORDINGS_DIR = Path.home() / ".local/share/jetson-ai/recordings"
+
 VOICE_MAP: dict[str, str] = {
     "en":                    "en_US-ryan-high",
     "en_US":                 "en_US-ryan-high",
@@ -141,9 +148,15 @@ def _make_wav(pcm: bytes, sample_rate: int) -> bytes:
 # ── Local speaker playback ────────────────────────────────────────────────────
 
 def _play_speaker_sync(pcm: bytes, sample_rate: int) -> float:
-    """Synchronous playback — runs in thread executor to avoid blocking the loop."""
+    """Synchronous playback — runs in thread executor to avoid blocking the loop.
+
+    Raises RuntimeError if playback fails, so callers don't report success silently.
+    """
     duration = len(pcm) / 2 / sample_rate
     sink_args = ["--device", PULSE_SINK] if PULSE_SINK else []
+
+    if not shutil.which("paplay"):
+        raise RuntimeError("paplay not found — install pulseaudio-utils")
 
     if shutil.which("ffmpeg"):
         # ffmpeg resample to 16kHz (matches BT HFP) → paplay
@@ -163,13 +176,19 @@ def _play_speaker_sync(pcm: bytes, sample_rate: int) -> float:
         ffmpeg.stdout.close()   # let paplay detect EOF when ffmpeg finishes
         ffmpeg.communicate(input=pcm)
         paplay.wait()
+        if ffmpeg.returncode != 0:
+            raise RuntimeError(f"ffmpeg resample failed (rc={ffmpeg.returncode})")
+        if paplay.returncode != 0:
+            raise RuntimeError(f"paplay failed (rc={paplay.returncode}) — check sink '{PULSE_SINK or 'default'}'")
     else:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             f.write(_make_wav(pcm, sample_rate))
             tmp = f.name
         try:
-            subprocess.run(["paplay", tmp] + sink_args)
+            subprocess.run(["paplay", tmp] + sink_args, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"paplay failed (rc={e.returncode})")
         finally:
             os.unlink(tmp)
 
@@ -444,9 +463,45 @@ async def _synth_text_to_audio(voice, text: str):
             yield chunk
 
 
+def _save_recording(wav: bytes, save_to: str) -> str:
+    """Save WAV under RECORDINGS_DIR only — callers can't pick arbitrary paths."""
+    name = Path(save_to).name or "recording.wav"
+    if not name.endswith(".wav"):
+        name += ".wav"
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = RECORDINGS_DIR / name
+    path.write_bytes(wav)
+    log.info("Saved recording → %s", path)
+    return str(path)
+
+
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Voice Pipeline", version="2.1.0")
+
+# Keep references to fire-and-forget playback tasks so they aren't GC'd mid-play
+_bg_tasks: set = set()
+
+
+def _spawn_bg(coro, label: str):
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+
+    def _done(t):
+        _bg_tasks.discard(t)
+        if not t.cancelled() and t.exception():
+            log.error("%s failed: %s", label, t.exception())
+
+    task.add_done_callback(_done)
+
+
+@app.middleware("http")
+async def _auth_middleware(request, call_next):
+    if API_TOKEN and request.url.path != "/health":
+        if request.headers.get("authorization") != f"Bearer {API_TOKEN}":
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 class ChatRequest(BaseModel):
@@ -458,7 +513,7 @@ class ChatRequest(BaseModel):
     api_key: Optional[str] = None
     api_base: Optional[str] = None
     system: Optional[str] = None
-    save_to: Optional[str] = None   # optional path to save WAV recording
+    save_to: Optional[str] = None   # filename — saved under ~/.local/share/jetson-ai/recordings/
     use_tools: bool = False          # enable calendar/email tool calling
 
 
@@ -466,7 +521,7 @@ class TtsRequest(BaseModel):
     text: str
     voice: str = "en"
     output: Optional[str] = None    # stream|speaker|both
-    save_to: Optional[str] = None
+    save_to: Optional[str] = None   # filename — saved under ~/.local/share/jetson-ai/recordings/
 
 
 @app.post("/voice/chat")
@@ -508,9 +563,7 @@ async def voice_chat(req: ChatRequest):
         duration = await _play_speaker(all_pcm, sr)
         wav      = _make_wav(all_pcm, sr)
 
-        if req.save_to:
-            Path(req.save_to).write_bytes(wav)
-            log.info("Saved recording → %s", req.save_to)
+        saved = _save_recording(wav, req.save_to) if req.save_to else None
 
         if out_mode == "both":
             return Response(content=wav, media_type="audio/wav")
@@ -520,7 +573,7 @@ async def voice_chat(req: ChatRequest):
             "text": final_text,
             "duration_s": round(duration, 2),
             "voice": req.voice,
-            "saved_to": req.save_to,
+            "saved_to": saved,
         }
 
     # ── Standard streaming path ───────────────────────────────────────────────
@@ -540,9 +593,7 @@ async def voice_chat(req: ChatRequest):
         req.system, out_mode,
     )
 
-    if req.save_to:
-        Path(req.save_to).write_bytes(wav)
-        log.info("Saved recording → %s", req.save_to)
+    saved = _save_recording(wav, req.save_to) if req.save_to else None
 
     if out_mode == "both":
         return Response(content=wav, media_type="audio/wav")
@@ -552,7 +603,7 @@ async def voice_chat(req: ChatRequest):
         "text": text,
         "duration_s": round(duration, 2),
         "voice": req.voice,
-        "saved_to": req.save_to,
+        "saved_to": saved,
     }
 
 
@@ -568,19 +619,25 @@ async def voice_tts(req: TtsRequest):
     out_mode = req.output or DEFAULT_OUTPUT
     loop = asyncio.get_event_loop()
     buf = io.BytesIO()
-    await loop.run_in_executor(_executor, lambda: voice.synthesize_wav(req.text, wave.open(buf, "wb")))
+
+    def _synth_wav():
+        # close the wave file so RIFF size headers get patched
+        with wave.open(buf, "wb") as wf:
+            voice.synthesize_wav(req.text, wf)
+
+    await loop.run_in_executor(_executor, _synth_wav)
     wav = buf.getvalue()
 
-    if req.save_to:
-        Path(req.save_to).write_bytes(wav)
+    saved = _save_recording(wav, req.save_to) if req.save_to else None
 
     if out_mode == "speaker":
         pcm = wav[44:]
         duration = await _play_speaker(pcm, voice.config.sample_rate)
-        return {"status": "ok", "text": req.text, "duration_s": round(duration, 2)}
+        return {"status": "ok", "text": req.text, "duration_s": round(duration, 2),
+                "saved_to": saved}
 
     if out_mode == "both":
-        asyncio.create_task(_play_speaker(wav[44:], voice.config.sample_rate))
+        _spawn_bg(_play_speaker(wav[44:], voice.config.sample_rate), "tts playback")
 
     return Response(content=wav, media_type="audio/wav")
 

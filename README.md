@@ -302,7 +302,7 @@ curl http://192.168.0.115:11434/v1/chat/completions \
 Add to `~/.bashrc` to get a mode selector on every login:
 
 ```bash
-echo 'source ~/gamma4_models/boot-choice.sh' >> ~/.bashrc
+echo "source $(pwd)/boot-choice.sh" >> ~/.bashrc   # run from the repo root
 ```
 
 ```

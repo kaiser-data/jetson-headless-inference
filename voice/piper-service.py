@@ -2,7 +2,7 @@
 """Piper TTS server — OpenAI /v1/audio/speech compatible on port 5500.
 
 Voices auto-loaded from ../voice/models/*.onnx
-Aliases: "en" → en_US-lessac-medium, "de" → de_DE-thorsten-medium
+Aliases: "en" → en_US-ryan-high, "de" → de_DE-thorsten-medium
 """
 
 import io

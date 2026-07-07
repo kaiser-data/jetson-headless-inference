@@ -69,7 +69,7 @@ _free_h() { free -h | awk '/^Mem:/ {print $4 " free / " $2 " total"}'; }
 _power()  { nvpmodel -q 2>/dev/null | awk '/NV Power Mode/{print $NF}' || echo "unknown"; }
 
 _ollama_up() {
-    curl -s --max-time 2 http://localhost:$PORT/ >/dev/null 2>&1
+    curl -s --max-time 2 "http://localhost:$PORT/" >/dev/null 2>&1
 }
 _wait_ollama() {
     local n=0
@@ -92,7 +92,7 @@ _sudo_ok() {
 _fit_check() {
     local MODEL="$1"
     local SHORT="${MODEL%%:*}"
-    local SIZE_GB="${MODEL_GB[$MODEL]:-${MODEL_GB[$SHORT:-0]}}"
+    local SIZE_GB="${MODEL_GB[$MODEL]:-${MODEL_GB[$SHORT]:-0}}"
     local FREE_MB
     FREE_MB=$(_free_mb)
     local FREE_GB
@@ -144,7 +144,11 @@ _ensure_model() {
     fi
     echo ""
     _warn "Model '$MODEL' not found locally."
-    read -r -p "  Pull it now? (~$(echo ${MODEL_GB[$MODEL]:-'?'})GB download) [y/N]: " ans
+    # Non-interactive (systemd / control API): no TTY to prompt on
+    if [ ! -t 0 ]; then
+        _err "Model not available. Run: ollama pull $MODEL"
+    fi
+    read -r -p "  Pull it now? (~${MODEL_GB[$MODEL]:-?}GB download) [y/N]: " ans
     if [[ "$ans" =~ ^[Yy]$ ]]; then
         _log "Pulling $MODEL ..."
         ollama pull "$MODEL" || _err "Pull failed"
@@ -211,7 +215,7 @@ _tts_status() {
     if _pipeline_up; then
         local VMODE
         VMODE=$(curl -s --max-time 2 "http://localhost:$PIPELINE_PORT/health" \
-            | python3 -c "import json,sys; print(json.load(sys.stdin).get('mode','?'))" 2>/dev/null || echo "?")
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('llm_mode','?'))" 2>/dev/null || echo "?")
         printf "  Pipeline  : RUNNING  http://%s:%s  mode=%s\n" "$IP" "$PIPELINE_PORT" "$VMODE"
     else
         printf "  Pipeline  : stopped\n"
@@ -685,14 +689,17 @@ cmd_tasks() {
 # -------------------------------------------------------
 cmd_install_services() {
     local SYSTEMD_DIR="$HOME/.config/systemd/user"
-    local SVC_SRC="$(cd "$(dirname "$0")" && pwd)/voice/systemd"
+    local REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+    local SVC_SRC="$REPO_DIR/voice/systemd"
 
     echo ""; _sep; _info "Installing systemd user services"; _sep; echo ""
     mkdir -p "$SYSTEMD_DIR"
 
-    for SVC in jetson-piper jetson-pipeline jetson-control jetson-bt; do
-        cp "$SVC_SRC/$SVC.service" "$SYSTEMD_DIR/"
-        _log "Installed $SVC.service"
+    # Units reference %h/gamma4_models — rewrite to wherever this repo actually lives
+    for UNIT in jetson-piper.service jetson-pipeline.service jetson-control.service \
+                jetson-bt.service jetson-sync.service jetson-sync.timer; do
+        sed "s|%h/gamma4_models|$REPO_DIR|g" "$SVC_SRC/$UNIT" > "$SYSTEMD_DIR/$UNIT"
+        _log "Installed $UNIT"
     done
 
     systemctl --user daemon-reload

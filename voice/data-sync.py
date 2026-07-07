@@ -9,8 +9,8 @@ Email backend: IMAP with heuristic importance classifier.
 
 Config (any of these — later overrides earlier):
   ~/.local/share/jetson-ai/sync.json  (JSON, keys in snake_case)
+  <repo>/.voice_env                   (KEY=VALUE, loaded by systemd)
   Environment variables               (UPPER_CASE)
-  ~/gamma4_models/.voice_env          (KEY=VALUE, loaded by systemd)
 
 Keys:
   Google Calendar (preferred):
@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 
 CACHE_DIR         = Path.home() / ".local/share/jetson-ai/cache"
 CONFIG_FILE       = Path.home() / ".local/share/jetson-ai/sync.json"
-VOICE_ENV         = Path.home() / "gamma4_models" / ".voice_env"
+VOICE_ENV         = Path(__file__).resolve().parent.parent / ".voice_env"
 DEFAULT_TOKEN     = Path.home() / ".local/share/jetson-ai" / "google_token.json"
 GOOGLE_SCOPES     = ["https://www.googleapis.com/auth/calendar.readonly"]
 
@@ -195,6 +195,7 @@ def _load_google_creds(token_path: Path):
         log.info("Refreshing Google token…")
         creds.refresh(Request())
         token_path.write_text(creds.to_json())
+        token_path.chmod(0o600)
     return creds if creds.valid else None
 
 
