@@ -61,6 +61,12 @@ Speaker output test needs the BT speaker connected: `POST :8080/bt/connect`, the
 - `POST :8080/power/mode` (`{"mode":"high"|"low"}`) — manual profile switch
   from anywhere (high = MAXN_SUPER `-m 2`, low = 15W `-m 0`). Resume already
   auto-switches to high; use this to drop back to low when leaving it awake.
+- `POST :8080/power/headless` (`{"headless":true|false}`) — stop/start GNOME
+  remotely; stopping frees ~1.5 GB (needed for 4 GB-class models).
+- wol-setup.sh also installs the **Ollama drop-in** (`jetson-ai.sh setup` was
+  never run on this box): binds 0.0.0.0 (direct LAN/tailnet access, no SSH
+  bridge), FlashAttention + q8 KV, `NUM_PARALLEL=1` (deliberately not 2 —
+  halves KV; don't let `jetson-ai.sh setup` overwrite it back to 2 on 8 GB).
 - `POST :8080/power/suspend` (`{"delay_s":3}`) suspends to RAM (deep/SC7);
   returns `wake_mac`. Token-protected like the rest of 8080. Without the
   sudoers rule it fails harmlessly (error in control.log).

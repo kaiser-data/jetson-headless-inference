@@ -20,6 +20,7 @@ Endpoints:
   GET  /sync/status            → show last sync timestamps from cache
   POST /power/suspend          → suspend to RAM (wake via WoL magic packet)
   POST /power/mode             → switch power profile (high = MAXN_SUPER, low = 15W)
+  POST /power/headless         → stop/start the desktop (frees ~1.5 GB for models)
 """
 
 import asyncio
@@ -430,6 +431,24 @@ async def power_mode(req: PowerModeRequest):
     if req.mode == "high":
         await _run_async(["sudo", "-n", "/usr/bin/jetson_clocks"])
     return {"status": "ok", "mode": req.mode, "power": _power_mode()}
+
+
+class HeadlessRequest(BaseModel):
+    headless: bool   # true = stop desktop, false = start it
+
+
+@app.post("/power/headless")
+async def power_headless(req: HeadlessRequest):
+    """Stop/start GNOME remotely. Stopping frees ~1.5 GB of the unified 8 GB
+    — required for 4 GB-class models. Needs sudoers from wol-setup.sh."""
+    action = "stop" if req.headless else "start"
+    for dm in ("gdm3", "gdm"):
+        rc = await _run_async(["sudo", "-n", "/usr/bin/systemctl", action, dm])
+        if rc == 0:
+            ram = await asyncio.get_event_loop().run_in_executor(None, _ram)
+            return {"status": "ok", "headless": req.headless, "dm": dm,
+                    "free_mb": ram.get("free_mb")}
+    raise HTTPException(500, f"could not {action} desktop — sudoers rule missing? run: sudo ./wol-setup.sh")
 
 
 @app.post("/power/suspend")
