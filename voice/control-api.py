@@ -18,6 +18,7 @@ Endpoints:
   GET  /bt/status              → Bluetooth speaker state
   POST /sync                   → trigger calendar/email data sync
   GET  /sync/status            → show last sync timestamps from cache
+  POST /power/suspend          → suspend to RAM (wake via WoL magic packet)
 """
 
 import asyncio
@@ -378,6 +379,43 @@ def sync_status():
         except Exception as e:
             result[name] = {"status": "parse_error", "error": str(e)}
     return result
+
+
+# ── Power ─────────────────────────────────────────────────────────────────────
+
+WOL_IFACE = os.getenv("WOL_IFACE", "eno1")
+
+
+class SuspendRequest(BaseModel):
+    delay_s: int = 3   # grace period so the HTTP response gets out first
+
+
+async def _suspend_after(delay: int):
+    log.info("Suspending in %ds — wake with a WoL magic packet on %s", delay, WOL_IFACE)
+    await asyncio.sleep(delay)
+    # Requires the NOPASSWD sudoers rule installed by wol-setup.sh
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", "/usr/bin/systemctl", "suspend",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        log.error("Suspend failed (rc=%d): %s — run: sudo ./wol-setup.sh",
+                  proc.returncode, stderr.decode().strip()[-300:])
+
+
+@app.post("/power/suspend")
+async def power_suspend(req: SuspendRequest, bg: BackgroundTasks):
+    """Suspend to RAM after delay_s. Wake by sending a magic packet to wake_mac."""
+    delay = max(1, min(req.delay_s, 300))
+    try:
+        mac = Path(f"/sys/class/net/{WOL_IFACE}/address").read_text().strip()
+    except Exception:
+        mac = "unknown"
+    bg.add_task(_suspend_after, delay)
+    return {"status": "suspending", "delay_s": delay, "wake_mac": mac,
+            "wake_iface": WOL_IFACE}
 
 
 # ── Subprocess helpers ────────────────────────────────────────────────────────

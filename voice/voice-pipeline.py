@@ -17,8 +17,9 @@ Tool calling (use_tools=true in request):
   Only supported in local (Ollama) and openai modes.
 
 Endpoints:
-  POST /voice/chat   → audio (stream/both) or JSON (speaker)
-  POST /voice/tts    → direct text→WAV, no LLM
+  POST /voice/chat        → audio (stream/both) or JSON (speaker)
+  POST /voice/tts         → direct text→WAV, no LLM
+  POST /voice/transcribe  → audio file → text (faster-whisper, auto language detect)
   GET  /health
 """
 
@@ -31,6 +32,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -38,7 +40,7 @@ from typing import AsyncGenerator, Literal, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -91,6 +93,25 @@ VOICE_MAP: dict[str, str] = {
 
 _piper_cache: dict[str, object] = {}
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="piper")
+
+# Whisper STT — lazy-loaded on first /voice/transcribe, CPU-only on purpose:
+# transcription must never compete with the LLM for the 8 GB of GPU RAM.
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+
+_whisper = None
+_whisper_lock = threading.Lock()
+_whisper_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
+
+
+def _get_whisper():
+    global _whisper
+    with _whisper_lock:
+        if _whisper is None:
+            from faster_whisper import WhisperModel
+            log.info("Loading whisper '%s' (cpu/int8) — first call downloads it", WHISPER_MODEL)
+            _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+            log.info("Whisper '%s' loaded", WHISPER_MODEL)
+        return _whisper
 
 
 # ── Voice loading ─────────────────────────────────────────────────────────────
@@ -642,6 +663,39 @@ async def voice_tts(req: TtsRequest):
     return Response(content=wav, media_type="audio/wav")
 
 
+@app.post("/voice/transcribe")
+async def voice_transcribe(
+    file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+):
+    """Audio file (wav/mp3/m4a/ogg/...) → text. Auto-detects language unless one is given."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "empty audio file")
+
+    def _run():
+        model = _get_whisper()
+        segments, info = model.transcribe(io.BytesIO(data), language=language,
+                                          vad_filter=True)
+        # segments is a lazy generator — consuming it does the actual work
+        text = " ".join(s.text.strip() for s in segments)
+        return text, info
+
+    loop = asyncio.get_event_loop()
+    try:
+        text, info = await loop.run_in_executor(_whisper_executor, _run)
+    except Exception as e:
+        raise HTTPException(500, f"transcription failed: {e}")
+
+    return {
+        "text": text,
+        "language": info.language,
+        "language_probability": round(info.language_probability, 3),
+        "audio_duration_s": round(info.duration, 2),
+        "model": WHISPER_MODEL,
+    }
+
+
 @app.get("/health")
 def health():
     cache_dir = Path.home() / ".local/share/jetson-ai/cache"
@@ -657,6 +711,7 @@ def health():
         "ollama_host": OLLAMA_HOST if VOICE_MODE == "local" else None,
         "pulse_sink": PULSE_SINK or "default",
         "tool_cache": {k: "present" for k in cache_files},
+        "whisper": {"model": WHISPER_MODEL, "loaded": _whisper is not None},
     }
 
 

@@ -1,8 +1,20 @@
-# Session Handover — 2026-07-09
+# Session Handover — 2026-07-09 (evening update)
 
 Read `.claude/skills/jetson-stack/SKILL.md` first — it holds the operational
 knowledge (services, ports, verify workflow, gotchas). This file is the
 *state and open decisions* snapshot.
+
+## Evening session additions (uncommitted in this repo)
+
+- **Suspend/WoL**: `POST :8080/power/suspend` + `wol-setup.sh` (root, not yet
+  run — WoL inactive until then). Mac + Jetson on same LAN, Jetson wired.
+- **STT**: `POST :8000/voice/transcribe` (faster-whisper small, CPU, lazy,
+  auto language detect — verified EN + DE round-trip via Piper).
+- **New separate repo** `kaiser-data/jetson-bench` (private,
+  `~/dev/projects/jetson-bench`): bench.py suite + dashboard.html +
+  wake-and-run.sh — all Mac-side/external tooling lives there now.
+- **GNOME stopped** (headless) this session — whisper (~1 GB) + GNOME made
+  3.4 GB LLM loads OOM on the unified 8 GB.
 
 ## Current state: healthy ✅
 

@@ -45,9 +45,42 @@ Speaker output test needs the BT speaker connected: `POST :8080/bt/connect`, the
 ## Models — the 8 GB rules
 
 - **The silent CPU-fallback trap**: a model that doesn't fit GPU RAM still runs, at ~0.3 tok/s instead of 13–35. `./jetson-ai.sh bench` and `status` detect it (GPU% < 50 = bad). Headless (`start` stops GNOME) frees 1.5 GB.
+- **The page-cache OOM trap** (learned 2026-07-09): after heavy disk I/O (pip installs, `ollama pull`), LLM loads fail with `cudaMalloc failed` / `NvMapMemAlloc error 12` even though `free` shows GBs "available" — NvMap won't force page-cache reclaim. Fix: `sudo sysctl vm.drop_caches=3`, or rootless: allocate+free a ~3 GB bytearray in python to balloon the cache out. Check the **buff/cache** column, not "available".
+- **A Claude Code session running on the Jetson costs ~700 MB** — benchmark from the Mac (jetson-bench repo), not from an on-device session, or 4 GB-class models won't fit.
 - **Prefer `-qat` tags for Gemma 4**: `gemma4:e2b-it-qat` = 4.3 GB vs plain `e2b` 7.2 GB, near-identical quality. Ollama default tags are already Q4_K_M (edge-optimal); avoid `q8` variants on 8 GB.
 - **Adding a model**: update BOTH `TASK_MODEL` (alias) and `MODEL_GB` (fit-check size) associative arrays in `jetson-ai.sh`, plus the `cmd_list`/`cmd_tasks` display rows and the README chart. A model missing from `MODEL_GB` degrades gracefully (size 0 → "size unknown") but the fit warning is lost.
 - Task aliases: default/code→qwen3.5:4b · fast/reasoning→phi4-mini · tiny→qwen3.5:0.8b · vision→gemma4:e2b-it-qat · vision-max→e4b-it-qat (headless only) · quality→llama3.1:8b · german→discolm (7.7 GB, tight).
+
+## Suspend / Wake-on-LAN (headless remote use)
+
+- One-time root setup: `sudo ./wol-setup.sh` — enables magic-packet wake on
+  `eno1` (persists via `wol-enable.service`, re-applied after every resume) and
+  whitelists `systemctl suspend` in `/etc/sudoers.d/jetson-wake`.
+- `POST :8080/power/suspend` (`{"delay_s":3}`) suspends to RAM (deep/SC7);
+  returns `wake_mac`. Token-protected like the rest of 8080. Without the
+  sudoers rule it fails harmlessly (error in control.log).
+- Wake: magic packet to `3c:6d:66:76:81:66` — **LAN broadcast only, does not
+  traverse Tailscale**; sender must be on the same LAN or use a LAN relay.
+- **Mac-side tooling lives in a separate repo**: `kaiser-data/jetson-bench`
+  (local: `~/dev/projects/jetson-bench`) — `wake-and-run.sh` (wake → task →
+  suspend; `--audio file` for STT; `NO_SUSPEND=1` to keep awake) and `bench.py`
+  (connectivity/model/TTS/STT suite, saves JSON results + dashboard.html,
+  `--push` commits them). This repo stays Jetson-internal.
+- **Never call /power/suspend from a session running on the Jetson itself** —
+  it kills your own SSH/Claude session.
+
+## STT / transcription
+
+- `POST :8000/voice/transcribe` — multipart `file` (wav/mp3/m4a/ogg), optional
+  `language` form field, else auto-detect. Returns text, language,
+  language_probability, audio_duration_s. faster-whisper, `WHISPER_MODEL` env
+  (default `small`), lazy-loaded on first call (~460 MB download, then cached).
+- **CPU on purpose** (never competes with the LLM for GPU) — but the loaded
+  model costs **~1 GB of the same unified 8 GB**. Loaded whisper + GNOME
+  running is enough to OOM a 3.4 GB LLM load ("cudaMalloc failed"). Headless
+  fixes it; a pipeline restart unloads whisper back to lazy.
+- Warm speed ~0.4× realtime on `small` (9 s for a 3.7 s clip); use
+  `WHISPER_MODEL=base` for faster/rougher.
 
 ## Repo conventions
 
