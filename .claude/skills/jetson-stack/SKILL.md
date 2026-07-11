@@ -54,8 +54,13 @@ Speaker output test needs the BT speaker connected: `POST :8080/bt/connect`, the
 ## Suspend / Wake-on-LAN (headless remote use)
 
 - One-time root setup: `sudo ./wol-setup.sh` — enables magic-packet wake on
-  `eno1` (persists via `wol-enable.service`, re-applied after every resume) and
-  whitelists `systemctl suspend` in `/etc/sudoers.d/jetson-wake`.
+  `eno1` (persists via `wol-enable.service`, re-applied after every resume),
+  installs `jetson-resume-perf.service` (**every wake from suspend lands in
+  MAXN_SUPER + jetson_clocks automatically**), and whitelists
+  suspend/nvpmodel/jetson_clocks in `/etc/sudoers.d/jetson-wake`.
+- `POST :8080/power/mode` (`{"mode":"high"|"low"}`) — manual profile switch
+  from anywhere (high = MAXN_SUPER `-m 2`, low = 15W `-m 0`). Resume already
+  auto-switches to high; use this to drop back to low when leaving it awake.
 - `POST :8080/power/suspend` (`{"delay_s":3}`) suspends to RAM (deep/SC7);
   returns `wake_mac`. Token-protected like the rest of 8080. Without the
   sudoers rule it fails harmlessly (error in control.log).

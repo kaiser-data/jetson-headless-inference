@@ -19,6 +19,7 @@ Endpoints:
   POST /sync                   → trigger calendar/email data sync
   GET  /sync/status            → show last sync timestamps from cache
   POST /power/suspend          → suspend to RAM (wake via WoL magic packet)
+  POST /power/mode             → switch power profile (high = MAXN_SUPER, low = 15W)
 """
 
 import asyncio
@@ -403,6 +404,32 @@ async def _suspend_after(delay: int):
     if proc.returncode != 0:
         log.error("Suspend failed (rc=%d): %s — run: sudo ./wol-setup.sh",
                   proc.returncode, stderr.decode().strip()[-300:])
+
+
+# nvpmodel numbers per /etc/nvpmodel.conf: 0=15W (default), 2=MAXN_SUPER
+POWER_PROFILES = {"high": "2", "low": "0"}
+
+
+class PowerModeRequest(BaseModel):
+    mode: str   # high | low
+
+
+@app.post("/power/mode")
+async def power_mode(req: PowerModeRequest):
+    """Switch power profile. Needs the sudoers rules from wol-setup.sh.
+
+    Note: resume from suspend already lands in high mode automatically
+    (jetson-resume-perf.service) — this is for manual overrides.
+    """
+    profile = POWER_PROFILES.get(req.mode)
+    if profile is None:
+        raise HTTPException(400, "mode must be high | low")
+    rc = await _run_async(["sudo", "-n", "/usr/sbin/nvpmodel", "-m", profile])
+    if rc != 0:
+        raise HTTPException(500, "nvpmodel failed — sudoers rule missing? run: sudo ./wol-setup.sh")
+    if req.mode == "high":
+        await _run_async(["sudo", "-n", "/usr/bin/jetson_clocks"])
+    return {"status": "ok", "mode": req.mode, "power": _power_mode()}
 
 
 @app.post("/power/suspend")
