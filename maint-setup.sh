@@ -24,11 +24,26 @@ _fail() { printf '\033[31m[maint-setup]\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || _fail "run with sudo: sudo ./maint-setup.sh"
 [ -n "$SVC_USER" ]   || _fail "SUDO_USER is empty — run via sudo from the account that should get the whitelist, not as root directly"
 
-# 1. Ollama reachable beyond loopback ----------------------------------------
+# 1. Ollama: reachable beyond loopback + memory-efficient on 8 GB -------------
+# (jetson-ai.sh setup writes the same filename with NUM_PARALLEL=2 and
+#  KEEP_ALIVE=-1; these values are the 8 GB-safe choice — see issue #1)
 mkdir -p /etc/systemd/system/ollama.service.d
-cat > /etc/systemd/system/ollama.service.d/net.conf << 'EOF'
+rm -f /etc/systemd/system/ollama.service.d/net.conf   # superseded by this file
+cat > /etc/systemd/system/ollama.service.d/jetson-performance.conf << 'EOF'
 [Service]
+# Bind to all interfaces so LAN/tailnet devices can reach the API
 Environment="OLLAMA_HOST=0.0.0.0:11434"
+# Warm during active use, auto-frees RAM on idle (not -1: long-resident
+# models accumulate memory pressure — issue #1)
+Environment="OLLAMA_KEEP_ALIVE=30m"
+# Only one model at a time (save RAM)
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+# Single caller on this box — halves KV cache vs 2
+Environment="OLLAMA_NUM_PARALLEL=1"
+# Flash Attention: 30-50% less KV cache memory
+Environment="OLLAMA_FLASH_ATTENTION=1"
+# KV cache quantization: halves KV memory, negligible quality loss
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
 EOF
 systemctl daemon-reload
 systemctl restart ollama

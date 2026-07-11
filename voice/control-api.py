@@ -21,6 +21,7 @@ Endpoints:
   POST /power/suspend          → suspend to RAM (wake via WoL magic packet)
   POST /power/mode             → switch power profile (high = MAXN_SUPER, low = 15W)
   POST /power/headless         → stop/start the desktop (frees ~1.5 GB for models)
+  POST /power/reclaim          → free memory now (whisper, page cache, ollama)
 """
 
 import asyncio
@@ -176,8 +177,9 @@ async def status():
     ram = await asyncio.get_event_loop().run_in_executor(None, _ram)
     return {
         "ram":      ram,
+        "swap":     _swap(),
         "power":    _power_mode(),
-        "llm":      ollama,
+        "llm":      {**ollama, **_watchdog_state()},
         "pipeline": pipeline,
         "tts":      tts,
         "bt":       bt,
@@ -417,11 +419,9 @@ class PowerModeRequest(BaseModel):
 
 @app.post("/power/mode")
 async def power_mode(req: PowerModeRequest):
-    """Switch power profile. Needs the sudoers rules from wol-setup.sh.
-
-    Note: resume from suspend already lands in high mode automatically
-    (jetson-resume-perf.service) — this is for manual overrides.
-    """
+    """Switch power profile on demand. Needs the sudoers rules from
+    wol-setup.sh. Wake lands in the 15W default; clients that need
+    throughput (bench) request high explicitly and drop back after."""
     profile = POWER_PROFILES.get(req.mode)
     if profile is None:
         raise HTTPException(400, "mode must be high | low")
@@ -431,6 +431,52 @@ async def power_mode(req: PowerModeRequest):
     if req.mode == "high":
         await _run_async(["sudo", "-n", "/usr/bin/jetson_clocks"])
     return {"status": "ok", "mode": req.mode, "power": _power_mode()}
+
+
+WATCHDOG_PY    = VOICE_DIR / "memory-watchdog.py"
+WATCHDOG_STATE = Path.home() / ".local/share/jetson-ai/watchdog.json"
+
+
+def _watchdog_state() -> dict:
+    try:
+        d = json.loads(WATCHDOG_STATE.read_text())
+        return {"llm_can_allocate": d.get("llm_can_allocate"),
+                "checked_at": d.get("ts"), "last_ok": d.get("last_ok_ts")}
+    except Exception:
+        return {"llm_can_allocate": None, "checked_at": None, "last_ok": None}
+
+
+def _swap() -> dict:
+    try:
+        info = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, v = line.split(":", 1)
+            info[k] = int(v.strip().split()[0]) // 1024
+        return {"total_mb": info.get("SwapTotal", 0),
+                "used_mb": info.get("SwapTotal", 0) - info.get("SwapFree", 0)}
+    except Exception:
+        return {}
+
+
+@app.post("/power/reclaim")
+async def power_reclaim():
+    """Free memory now: unload whisper (pipeline restart), balloon out the
+    page cache, restart ollama — then verify the LLM can allocate again.
+    Takes 1-5 min (canary may reload a model); call before big-model runs."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(WATCHDOG_PY), "--reclaim", "--json",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=420)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(504, "reclaim timed out")
+    try:
+        return json.loads(stdout.decode().strip().splitlines()[-1])
+    except Exception:
+        raise HTTPException(500, f"reclaim failed: {stderr.decode()[-300:]}")
 
 
 class HeadlessRequest(BaseModel):

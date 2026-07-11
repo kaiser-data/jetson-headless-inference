@@ -1,0 +1,10 @@
+[Unit]
+Description=Jetson AI — Memory-Pressure Watchdog (canary + escalating recovery)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/gamma4_models
+EnvironmentFile=-%h/gamma4_models/.voice_env
+ExecStart=/usr/bin/python3 %h/gamma4_models/voice/memory-watchdog.py
+StandardOutput=append:%h/.local/share/jetson-ai/watchdog.log
+StandardError=append:%h/.local/share/jetson-ai/watchdog.log

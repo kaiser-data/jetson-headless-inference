@@ -3,19 +3,20 @@
 #
 #   sudo ./wol-setup.sh [interface]     (default: eno1)
 #
-# Sets up everything remote control needs:
+# Owns the wake/power domain (maintenance access lives in maint-setup.sh):
 #   1. Verifies the NIC supports magic-packet wake, enables it now
 #   2. Installs a systemd unit that re-enables WoL on boot AND after
 #      every resume (the driver can reset the flag on suspend cycles)
-#   3. Installs a resume hook that switches to high-inference mode
-#      (MAXN_SUPER + jetson_clocks) every time the box wakes from suspend
-#   4. Installs the Ollama drop-in: bind 0.0.0.0 (reachable from LAN and
-#      tailnet — no SSH bridge needed) + FlashAttention/q8 KV cache
-#      (less memory per model on the shared 8 GB)
-#   5. Whitelists systemctl suspend / nvpmodel / jetson_clocks / gdm
-#      stop-start / ollama restart in sudoers so the control API (8080:
-#      /power/suspend, /power/mode, /power/headless) can drive the box
-#      remotely without a password
+#   3. Whitelists systemctl suspend / nvpmodel / jetson_clocks in sudoers
+#      so the control API (8080: /power/suspend, /power/mode) can drive
+#      power state remotely without a password
+#
+# Wake lands in the default power mode (15W). High-inference mode is
+# on-demand via POST :8080/power/mode {"mode":"high"} — clients that need
+# it (bench) request it; a lone voice task doesn't pay the MAXN power bill.
+#
+# Companion: sudo ./maint-setup.sh — Ollama bind/perf drop-in, display
+# manager stop/start, ollama restart, reboot whitelist.
 set -euo pipefail
 
 IFACE="${1:-eno1}"
@@ -58,62 +59,27 @@ systemctl daemon-reload
 systemctl enable --now wol-enable.service
 _log "wol-enable.service installed (runs at boot and after each resume)"
 
-# 3. Resume hook: wake straight into high-inference mode ---------------------
-cat > /etc/systemd/system/jetson-resume-perf.service << 'EOF'
-[Unit]
-Description=High-inference mode (MAXN_SUPER + max clocks) after resume
-After=suspend.target
+# 3. Remove the auto-MAXN resume hook from earlier versions ------------------
+# (decision: high mode is on-demand via /power/mode, not forced on every wake)
+if [ -f /etc/systemd/system/jetson-resume-perf.service ]; then
+    systemctl disable jetson-resume-perf.service 2>/dev/null || true
+    rm -f /etc/systemd/system/jetson-resume-perf.service
+    systemctl daemon-reload
+    _log "removed jetson-resume-perf.service (MAXN now on-demand via /power/mode)"
+fi
 
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/nvpmodel -m 2
-ExecStart=/usr/bin/jetson_clocks
-
-[Install]
-WantedBy=suspend.target
-EOF
-systemctl daemon-reload
-systemctl enable jetson-resume-perf.service
-_log "jetson-resume-perf.service installed (MAXN_SUPER on every wake)"
-
-# 4. Ollama: remote access + memory-efficient settings ------------------------
-# (jetson-ai.sh setup installs the same file with NUM_PARALLEL=2; 1 is the
-#  safer choice on 8 GB — halves KV cache, single caller anyway)
-mkdir -p /etc/systemd/system/ollama.service.d
-cat > /etc/systemd/system/ollama.service.d/jetson-performance.conf << 'EOF'
-[Service]
-# Bind to all interfaces so LAN/tailnet devices can reach the API
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-# Never unload model from RAM between requests (stays warm across suspend)
-Environment="OLLAMA_KEEP_ALIVE=-1"
-# Only one model at a time (save RAM)
-Environment="OLLAMA_MAX_LOADED_MODELS=1"
-# Single caller on this box — halves KV cache vs 2
-Environment="OLLAMA_NUM_PARALLEL=1"
-# Flash Attention: 30-50% less KV cache memory
-Environment="OLLAMA_FLASH_ATTENTION=1"
-# KV cache quantization: halves KV memory, negligible quality loss
-Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
-EOF
-systemctl daemon-reload
-systemctl restart ollama
-_log "Ollama drop-in installed: binds 0.0.0.0, FlashAttention + q8 KV cache"
-
-# 5. Sudoers rules for the control API ----------------------------------------
+# 4. Sudoers rules for the control API ----------------------------------------
 # Both /bin and /usr/bin variants — sudoers matches the exact resolved path
 cat > /etc/sudoers.d/jetson-wake << EOF
 $SVC_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl suspend
 $SVC_USER ALL=(ALL) NOPASSWD: /bin/systemctl suspend
 $SVC_USER ALL=(ALL) NOPASSWD: /usr/sbin/nvpmodel
 $SVC_USER ALL=(ALL) NOPASSWD: /usr/bin/jetson_clocks
-$SVC_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop gdm3, /bin/systemctl stop gdm3
-$SVC_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start gdm3, /bin/systemctl start gdm3
-$SVC_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop gdm, /bin/systemctl stop gdm
-$SVC_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start gdm, /bin/systemctl start gdm
-$SVC_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart ollama, /bin/systemctl restart ollama
 EOF
 chmod 440 /etc/sudoers.d/jetson-wake
-_log "sudoers rules installed: suspend / power / headless / ollama passwordless for $SVC_USER"
+visudo -c -f /etc/sudoers.d/jetson-wake > /dev/null \
+    || { rm -f /etc/sudoers.d/jetson-wake; _fail "sudoers syntax check failed — rules removed"; }
+_log "sudoers rules installed: suspend / nvpmodel / jetson_clocks passwordless for $SVC_USER"
 
 # Summary --------------------------------------------------------------------
 MAC="$(cat "/sys/class/net/$IFACE/address")"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Jetson AI — Memory watchdog every 15 min
+Requires=jetson-watchdog.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=jetson-watchdog.service
+
+[Install]
+WantedBy=timers.target

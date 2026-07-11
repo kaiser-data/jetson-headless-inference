@@ -704,14 +704,16 @@ cmd_install_services() {
 
     # Units reference %h/gamma4_models — rewrite to wherever this repo actually lives
     for UNIT in jetson-piper.service jetson-pipeline.service jetson-control.service \
-                jetson-bt.service jetson-sync.service jetson-sync.timer; do
+                jetson-bt.service jetson-sync.service jetson-sync.timer \
+                jetson-watchdog.service jetson-watchdog.timer; do
         sed "s|%h/gamma4_models|$REPO_DIR|g" "$SVC_SRC/$UNIT" > "$SYSTEMD_DIR/$UNIT"
         _log "Installed $UNIT"
     done
 
     systemctl --user daemon-reload
     systemctl --user enable jetson-piper jetson-pipeline jetson-control jetson-bt
-    _log "Services enabled for autostart on login"
+    systemctl --user enable --now jetson-watchdog.timer
+    _log "Services enabled for autostart on login (watchdog timer started)"
 
     echo ""; _sep
     _info "Services installed. They start automatically on next login."

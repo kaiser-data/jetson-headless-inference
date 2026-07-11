@@ -47,26 +47,28 @@ Speaker output test needs the BT speaker connected: `POST :8080/bt/connect`, the
 - **The silent CPU-fallback trap**: a model that doesn't fit GPU RAM still runs, at ~0.3 tok/s instead of 13–35. `./jetson-ai.sh bench` and `status` detect it (GPU% < 50 = bad). Headless (`start` stops GNOME) frees 1.5 GB.
 - **The page-cache OOM trap** (learned 2026-07-09): after heavy disk I/O (pip installs, `ollama pull`), LLM loads fail with `cudaMalloc failed` / `NvMapMemAlloc error 12` even though `free` shows GBs "available" — NvMap won't force page-cache reclaim. Fix: `sudo sysctl vm.drop_caches=3`, or rootless: allocate+free a ~3 GB bytearray in python to balloon the cache out. Check the **buff/cache** column, not "available".
 - **A Claude Code session running on the Jetson costs ~700 MB** — benchmark from the Mac (jetson-bench repo), not from an on-device session, or 4 GB-class models won't fit.
+- **Memory watchdog (issue #1)**: `jetson-watchdog.timer` (15 min) canaries a 1-token generate; on OOM escalates restart-pipeline → balloon → restart-ollama → reboot (last resort, only with `WATCHDOG_REBOOT=1` in `.voice_env` and 03:00–06:00). On demand: `POST :8080/power/reclaim`. `/status` exposes `swap` and `llm.llm_can_allocate` (state: `~/.local/share/jetson-ai/watchdog.json`, log: `watchdog.log`). Whisper self-unloads after `WHISPER_IDLE_S` (default 900 s) idle.
 - **Prefer `-qat` tags for Gemma 4**: `gemma4:e2b-it-qat` = 4.3 GB vs plain `e2b` 7.2 GB, near-identical quality. Ollama default tags are already Q4_K_M (edge-optimal); avoid `q8` variants on 8 GB.
 - **Adding a model**: update BOTH `TASK_MODEL` (alias) and `MODEL_GB` (fit-check size) associative arrays in `jetson-ai.sh`, plus the `cmd_list`/`cmd_tasks` display rows and the README chart. A model missing from `MODEL_GB` degrades gracefully (size 0 → "size unknown") but the fit warning is lost.
 - Task aliases: default/code→qwen3.5:4b · fast/reasoning→phi4-mini · tiny→qwen3.5:0.8b · vision→gemma4:e2b-it-qat · vision-max→e4b-it-qat (headless only) · quality→llama3.1:8b · german→discolm (7.7 GB, tight).
 
 ## Suspend / Wake-on-LAN (headless remote use)
 
-- One-time root setup: `sudo ./wol-setup.sh` — enables magic-packet wake on
-  `eno1` (persists via `wol-enable.service`, re-applied after every resume),
-  installs `jetson-resume-perf.service` (**every wake from suspend lands in
-  MAXN_SUPER + jetson_clocks automatically**), and whitelists
-  suspend/nvpmodel/jetson_clocks in `/etc/sudoers.d/jetson-wake`.
-- `POST :8080/power/mode` (`{"mode":"high"|"low"}`) — manual profile switch
-  from anywhere (high = MAXN_SUPER `-m 2`, low = 15W `-m 0`). Resume already
-  auto-switches to high; use this to drop back to low when leaving it awake.
+- Two root setup scripts, disjoint domains (both idempotent, re-run safe):
+  `sudo ./wol-setup.sh` = wake/power (WoL on `eno1` via `wol-enable.service`,
+  suspend/nvpmodel/jetson_clocks sudoers); `sudo ./maint-setup.sh` =
+  maintenance (Ollama drop-in, display-manager stop/start, ollama restart,
+  reboot sudoers).
+- `POST :8080/power/mode` (`{"mode":"high"|"low"}`) — on-demand profile
+  switch (high = MAXN_SUPER `-m 2`, low = 15W `-m 0`). **Wake lands in 15W
+  by design** (an early auto-MAXN resume hook was removed — user decision
+  2026-07-11); bench forces high itself, single voice tasks run at 15W.
 - `POST :8080/power/headless` (`{"headless":true|false}`) — stop/start GNOME
   remotely; stopping frees ~1.5 GB (needed for 4 GB-class models).
-- wol-setup.sh also installs the **Ollama drop-in** (`jetson-ai.sh setup` was
-  never run on this box): binds 0.0.0.0 (direct LAN/tailnet access, no SSH
-  bridge), FlashAttention + q8 KV, `NUM_PARALLEL=1` (deliberately not 2 —
-  halves KV; don't let `jetson-ai.sh setup` overwrite it back to 2 on 8 GB).
+- The **Ollama drop-in** (via maint-setup.sh; `jetson-ai.sh setup` was never
+  run on this box): binds 0.0.0.0 (direct LAN/tailnet access, no SSH bridge),
+  FlashAttention + q8 KV, `NUM_PARALLEL=1` (deliberately not 2 — halves KV;
+  don't let `jetson-ai.sh setup` overwrite it back to 2 on 8 GB).
 - `POST :8080/power/suspend` (`{"delay_s":3}`) suspends to RAM (deep/SC7);
   returns `wake_mac`. Token-protected like the rest of 8080. Without the
   sudoers rule it fails harmlessly (error in control.log).

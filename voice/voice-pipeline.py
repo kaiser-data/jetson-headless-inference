@@ -30,9 +30,11 @@ import logging
 import os
 import shutil
 import struct
+import gc
 import subprocess
 import sys
 import threading
+import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -96,22 +98,38 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="piper")
 
 # Whisper STT — lazy-loaded on first /voice/transcribe, CPU-only on purpose:
 # transcription must never compete with the LLM for the 8 GB of GPU RAM.
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+# A resident model costs ~1 GB of the unified pool, so it is unloaded again
+# after WHISPER_IDLE_S without a transcribe call (0 = keep forever). Issue #1.
+WHISPER_MODEL  = os.getenv("WHISPER_MODEL", "small")
+WHISPER_IDLE_S = int(os.getenv("WHISPER_IDLE_S", "900"))
 
 _whisper = None
+_whisper_last_used = 0.0
 _whisper_lock = threading.Lock()
 _whisper_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
 
 
 def _get_whisper():
-    global _whisper
+    global _whisper, _whisper_last_used
     with _whisper_lock:
         if _whisper is None:
             from faster_whisper import WhisperModel
             log.info("Loading whisper '%s' (cpu/int8) — first call downloads it", WHISPER_MODEL)
             _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
             log.info("Whisper '%s' loaded", WHISPER_MODEL)
+        _whisper_last_used = time.time()
         return _whisper
+
+
+async def _whisper_idle_reaper():
+    global _whisper
+    while True:
+        await asyncio.sleep(60)
+        with _whisper_lock:
+            if _whisper is not None and time.time() - _whisper_last_used > WHISPER_IDLE_S:
+                log.info("Unloading whisper after %ss idle (frees ~1 GB)", WHISPER_IDLE_S)
+                _whisper = None
+                gc.collect()
 
 
 # ── Voice loading ─────────────────────────────────────────────────────────────
@@ -500,6 +518,12 @@ def _save_recording(wav: bytes, save_to: str) -> str:
 
 app = FastAPI(title="Voice Pipeline", version="2.1.0")
 
+
+@app.on_event("startup")
+async def _start_whisper_reaper():
+    if WHISPER_IDLE_S > 0:
+        asyncio.get_event_loop().create_task(_whisper_idle_reaper())
+
 # Keep references to fire-and-forget playback tasks so they aren't GC'd mid-play
 _bg_tasks: set = set()
 
@@ -674,11 +698,13 @@ async def voice_transcribe(
         raise HTTPException(400, "empty audio file")
 
     def _run():
+        global _whisper_last_used
         model = _get_whisper()
         segments, info = model.transcribe(io.BytesIO(data), language=language,
                                           vad_filter=True)
         # segments is a lazy generator — consuming it does the actual work
         text = " ".join(s.text.strip() for s in segments)
+        _whisper_last_used = time.time()   # idle clock starts after the job
         return text, info
 
     loop = asyncio.get_event_loop()
