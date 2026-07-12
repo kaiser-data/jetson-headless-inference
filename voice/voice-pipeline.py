@@ -96,12 +96,17 @@ VOICE_MAP: dict[str, str] = {
 _piper_cache: dict[str, object] = {}
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="piper")
 
-# Whisper STT — lazy-loaded on first /voice/transcribe, CPU-only on purpose:
-# transcription must never compete with the LLM for the 8 GB of GPU RAM.
+# Whisper STT — lazy-loaded on first /voice/transcribe. Defaults to CPU so
+# transcription never competes with the LLM for the 8 GB of GPU RAM; with a
+# small LLM (≤1 GB) set WHISPER_DEVICE=cuda WHISPER_COMPUTE=int8_float16 —
+# CPU "small" runs at RTF ~2.0 (slower than realtime), GPU at ~0.2.
 # A resident model costs ~1 GB of the unified pool, so it is unloaded again
-# after WHISPER_IDLE_S without a transcribe call (0 = keep forever). Issue #1.
-WHISPER_MODEL  = os.getenv("WHISPER_MODEL", "small")
-WHISPER_IDLE_S = int(os.getenv("WHISPER_IDLE_S", "900"))
+# after WHISPER_IDLE_S without a transcribe call (0 = keep forever — use that
+# for a realtime assistant; the reload costs ~2 s on the next turn). Issue #1.
+WHISPER_MODEL   = os.getenv("WHISPER_MODEL", "small")
+WHISPER_DEVICE  = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")
+WHISPER_IDLE_S  = int(os.getenv("WHISPER_IDLE_S", "900"))
 
 _whisper = None
 _whisper_last_used = 0.0
@@ -114,8 +119,10 @@ def _get_whisper():
     with _whisper_lock:
         if _whisper is None:
             from faster_whisper import WhisperModel
-            log.info("Loading whisper '%s' (cpu/int8) — first call downloads it", WHISPER_MODEL)
-            _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+            log.info("Loading whisper '%s' (%s/%s) — first call downloads it",
+                     WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE)
+            _whisper = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE,
+                                    compute_type=WHISPER_COMPUTE)
             log.info("Whisper '%s' loaded", WHISPER_MODEL)
         _whisper_last_used = time.time()
         return _whisper
@@ -320,17 +327,57 @@ async def _llm_stream(
 
 # ── Core synthesis pipeline ───────────────────────────────────────────────────
 
+# First reply chunk is cut early at a clause boundary at this size, so a
+# long opening sentence can't hold back first audio.
+FIRST_CHUNK_CHARS = int(os.getenv("FIRST_CHUNK_CHARS", "60"))
+
+
 async def _run_pipeline(voice, prompt: str, mode: str, model: str,
                         api_key: str, api_base: str, system: Optional[str]):
-    """Run LLM→split→synth pipeline. Yields (sentence_text, pcm_chunks) pairs."""
-    splitter = StreamingSentenceSplitter(min_chars=12)
-    async for token in _llm_stream(prompt, mode, model, api_key, api_base, system):
-        for sentence in splitter.feed(token):
+    """Run LLM→split→synth pipeline. Yields (sentence_text, pcm_chunks) pairs.
+
+    Token consumption and synthesis overlap: a producer task keeps pulling
+    LLM tokens into a queue while Piper synthesizes the previous sentence —
+    otherwise the LLM sits idle for the full synth time of every sentence.
+    """
+    t0 = time.monotonic()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+
+    async def _produce():
+        first_token = True
+        try:
+            splitter = StreamingSentenceSplitter(
+                min_chars=12, first_chunk_chars=FIRST_CHUNK_CHARS)
+            async for token in _llm_stream(prompt, mode, model, api_key, api_base, system):
+                if first_token:
+                    log.info("timing: llm first token %.0f ms", (time.monotonic() - t0) * 1000)
+                    first_token = False
+                for sentence in splitter.feed(token):
+                    await queue.put(sentence)
+            if remaining := splitter.flush():
+                await queue.put(remaining)
+            await queue.put(None)
+        except asyncio.CancelledError:
+            raise               # consumer is gone — nobody needs the sentinel
+        except BaseException:
+            await queue.put(None)   # consumer is draining; unblock it, then
+            raise                   # let `await producer` re-raise below
+
+    producer = asyncio.create_task(_produce())
+    first_sentence = True
+    try:
+        while (sentence := await queue.get()) is not None:
+            ts = time.monotonic()
             chunks = await _synth(voice, sentence)
+            if first_sentence:
+                log.info("timing: first audio ready %.0f ms (synth %.0f ms, %d chars)",
+                         (time.monotonic() - t0) * 1000,
+                         (time.monotonic() - ts) * 1000, len(sentence))
+                first_sentence = False
             yield sentence, chunks
-    if remaining := splitter.flush():
-        chunks = await _synth(voice, remaining)
-        yield remaining, chunks
+        await producer   # surface LLM errors that ended the stream early
+    finally:
+        producer.cancel()
 
 
 # ── Output mode implementations ───────────────────────────────────────────────
@@ -493,7 +540,8 @@ async def _resolve_with_tools(
 async def _synth_text_to_audio(voice, text: str):
     """Sentence-split a complete text string and yield WAV header + PCM chunks."""
     yield _streaming_wav_header(voice.config.sample_rate)
-    splitter = StreamingSentenceSplitter(min_chars=12)
+    splitter = StreamingSentenceSplitter(min_chars=12,
+                                         first_chunk_chars=FIRST_CHUNK_CHARS)
     for sentence in splitter.feed(text):
         for chunk in await _synth(voice, sentence):
             yield chunk
@@ -662,6 +710,16 @@ async def voice_tts(req: TtsRequest):
         raise HTTPException(404, str(e))
 
     out_mode = req.output or DEFAULT_OUTPUT
+
+    # Pure streaming path: first audio bytes leave while synthesis continues.
+    # save_to/speaker/both need the complete PCM, so they keep the buffered path.
+    if out_mode == "stream" and not req.save_to:
+        return StreamingResponse(
+            _synth_text_to_audio(voice, req.text),
+            media_type="audio/wav",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     loop = asyncio.get_event_loop()
     buf = io.BytesIO()
 
@@ -743,7 +801,9 @@ def health():
 
 if __name__ == "__main__":
     log.info("Voice pipeline — llm_mode=%s  output=%s", VOICE_MODE, DEFAULT_OUTPUT)
-    for alias in ("en", "de"):
+    # Preload every distinct mapped voice — a lazy load costs ~1.7 s on the
+    # first request that uses it.
+    for alias in dict.fromkeys(VOICE_MAP.values()):
         try:
             _load_voice(alias)
         except FileNotFoundError:

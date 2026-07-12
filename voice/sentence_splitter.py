@@ -21,9 +21,29 @@ class StreamingSentenceSplitter:
     retrieve any trailing fragment.
     """
 
-    def __init__(self, min_chars: int = 12):
+    _CLAUSE = re.compile(r'[,;:—]\s+')
+
+    def __init__(self, min_chars: int = 12, first_chunk_chars: int | None = None):
         self.buffer = ""
         self.min_chars = min_chars
+        # Emit the FIRST chunk early at a clause boundary once the buffer
+        # reaches this size — a long opening sentence otherwise delays first
+        # audio by seconds. None disables.
+        self.first_chunk_chars = first_chunk_chars
+        self._yielded_any = False
+
+    def _early_first_chunk(self) -> str | None:
+        if (self._yielded_any or not self.first_chunk_chars
+                or len(self.buffer) < self.first_chunk_chars):
+            return None
+        cuts = [m for m in self._CLAUSE.finditer(self.buffer)
+                if m.start() >= self.min_chars]
+        if not cuts:
+            return None
+        cut = cuts[-1]
+        chunk = self.buffer[: cut.end()].strip()
+        self.buffer = self.buffer[cut.end():]
+        return chunk
 
     def feed(self, token: str) -> list[str]:
         """Add a token and return any newly complete sentences."""
@@ -57,6 +77,11 @@ class StreamingSentenceSplitter:
             self.buffer = self.buffer[m.end():]
             search_from = 0  # reset for next search within remaining buffer
 
+        if sentences:
+            self._yielded_any = True
+        elif (early := self._early_first_chunk()) is not None:
+            sentences.append(early)
+            self._yielded_any = True
         return sentences
 
     def flush(self) -> str | None:
